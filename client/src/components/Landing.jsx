@@ -1,116 +1,131 @@
-import React from 'react'
-import TrueFocus from './TrueFocus';
-import Hyperspeed from './Hyperspeed';
+import React from 'react';
+import Squares from './Squares';
+import Navbar from './Navbar';
+import ShinyText from './ShinyText';
 
 function Landing() {
   return (
-    <div className="relative w-full h-screen overflow-hidden" style={{ background: '#1a1a2e' }}>
-      {/* Hyperspeed background */}
+    <div className="relative w-full min-h-screen overflow-x-hidden overflow-y-auto font-['Poppins',sans-serif]" style={{ background: '#000000' }}>
+      {/* Squares background */}
       <div className="absolute inset-0 z-0">
-        <Hyperspeed
-          effectOptions={{
-            onSpeedUp: () => { },
-            onSlowDown: () => { },
-            distortion: 'turbulentDistortion',
-            length: 400,
-            roadWidth: 10,
-            islandWidth: 2,
-            lanesPerRoad: 4,
-            fov: 90,
-            fovSpeedUp: 150,
-            speedUp: 2,
-            carLightsFade: 0.4,
-            totalSideLightSticks: 20,
-            lightPairsPerRoadWay: 40,
-            shoulderLinesWidthPercentage: 0.05,
-            brokenLinesWidthPercentage: 0.1,
-            brokenLinesLengthPercentage: 0.5,
-            lightStickWidth: [0.12, 0.5],
-            lightStickHeight: [1.3, 1.7],
-            movingAwaySpeed: [60, 80],
-            movingCloserSpeed: [-120, -160],
-            carLightsLength: [400 * 0.03, 400 * 0.2],
-            carLightsRadius: [0.05, 0.14],
-            carWidthPercentage: [0.3, 0.5],
-            carShiftX: [-0.8, 0.8],
-            carFloorSeparation: [0, 5],
-            colors: {
-              roadColor: 0x080808,
-              islandColor: 0x0a0a0a,
-              background: 0x000000,
-              shoulderLines: 0xFFFFFF,
-              brokenLines: 0xFFFFFF,
-              leftCars: [0xD856BF, 0x6750A2, 0xC247AC],
-              rightCars: [0x03B3C3, 0x0E5EA5, 0x324555],
-              sticks: 0x03B3C3,
-            }
-          }}
+        <Squares
+          speed={0.6}
+          squareSize={40}
+          direction='diagonal'
+          borderColor='#9a69b5'
+          hoverFillColor='#222222'
         />
       </div>
-      
-      {/* Navigation Bar - Centered with rounded background */}
-      <div className="relative z-20 flex justify-center pt-8">
-        <nav className="bg-gray-800/60 backdrop-blur-md border border-gray-700/50 rounded-full px-8 py-4 flex items-center justify-between min-w-[600px]">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M2 17L12 22L22 17" stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M2 12L12 17L22 12" stroke="black" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </div>
-            <span className="text-white text-lg font-medium">React Bits</span>
-          </div>
-          <div className="flex items-center space-x-6">
-            <a href="#" className="text-white hover:text-gray-300 transition-colors font-medium">Home</a>
-            <a href="#" className="text-white hover:text-gray-300 transition-colors font-medium">Docs</a>
-          </div>
-        </nav>
-      </div>
 
-      {/* New Background Button - Centered */}
-      <div className="relative z-20 flex justify-center mt-12">
-        <button className="bg-gray-800/80 backdrop-blur-sm border border-gray-600/50 text-white px-5 py-2.5 rounded-full text-sm hover:bg-gray-700/80 transition-all duration-200 flex items-center space-x-2">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke="currentColor" strokeWidth="2"/>
-            <circle cx="8.5" cy="8.5" r="1.5" stroke="currentColor" strokeWidth="2"/>
-            <path d="M21 15L16 10L5 21" stroke="currentColor" strokeWidth="2"/>
-          </svg>
-          <span>New Background</span>
-        </button>
-      </div>
+      {/* Navigation Bar */}
+      <Navbar />
 
       {/* Main Content */}
-      <div className="relative z-10 flex flex-col items-center justify-center flex-1 px-4 mt-8">
+      <div className="relative z-10 flex flex-col items-center justify-center min-h-screen px-4 -mt-24">
 
         {/* Main Heading */}
-        <div className="text-center mb-16 max-w-6xl">
-          <h1 className="text-white text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-bold leading-[0.9] tracking-tight">
-            Click & hold to see the real{' '}
-            <span className="block mt-2">magic of hyperspeed!</span>
-          </h1>
+        <div className="text-center mb-16 max-w-5xl">
+          <ShinyText
+            text="Delhi Flow"
+            disabled={false}
+            speed={3}
+            className="text-6xl md:text-7xl lg:text-8xl xl:text-9xl font-bold leading-tight mb-10"
+          />
+          <p className="text-white/80 text-lg md:text-xl lg:text-2xl leading-relaxed max-w-3xl mx-auto font-light">
+            AI meets hydrology to forecast urban floods at hyperlocal precision. 
+            Smarter data, safer streets, resilient cities.
+          </p>
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center space-x-6">
-          <button className="bg-white text-black px-10 py-4 rounded-full font-semibold hover:bg-gray-100 transition-colors text-base">
+        <div className="flex flex-col sm:flex-row items-center gap-5">
+          <button className="bg-white text-black px-10 py-4 rounded-full font-semibold hover:bg-purple-50 hover:scale-105 transition-all duration-200 text-lg shadow-lg shadow-purple-500/20 min-w-[160px]">
             Get Started
           </button>
-          <button className="bg-gray-800/70 backdrop-blur-sm border border-gray-600/50 text-white px-10 py-4 rounded-full font-semibold hover:bg-gray-700/70 transition-colors text-base">
+          <button className="bg-purple-600/20 backdrop-blur-md border-2 border-purple-400/30 text-white px-10 py-4 rounded-full font-semibold hover:bg-purple-600/30 hover:border-purple-400/50 hover:scale-105 transition-all duration-200 text-lg min-w-[160px]">
             Learn More
           </button>
         </div>
       </div>
 
-      {/* Demo Content Toggle */}
-      <div className="absolute bottom-8 right-8 z-20 flex items-center space-x-3">
-        <span className="text-gray-400 text-sm font-medium">Demo Content</span>
-        <div className="relative">
-          <input type="checkbox" className="sr-only" defaultChecked />
-          <div className="w-11 h-6 bg-gray-700 rounded-full shadow-inner border border-gray-600"></div>
-          <div className="absolute w-5 h-5 bg-white rounded-full shadow-sm top-0.5 right-0.5 transition-all duration-200 ease-in-out"></div>
+      {/* About Section */}
+      <div className="relative z-10 px-4 py-20">
+        <div className="max-w-7xl mx-auto">
+          {/* Section Title */}
+          <div className="text-center mb-16">
+            <h2 className="text-transparent bg-clip-text bg-gradient-to-r from-purple-300 via-fuchsia-400 to-pink-400 text-4xl md:text-5xl lg:text-6xl font-bold mb-6">
+              About Delhi Flow
+            </h2>
+            <p className="text-white/70 text-lg md:text-xl max-w-2xl mx-auto font-light">
+              Revolutionizing urban flood forecasting with cutting-edge AI technology
+            </p>
+          </div>
+
+          {/* Feature Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
+            {/* Card 1 */}
+            <div className="bg-purple-900/20 backdrop-blur-xl border border-purple-400/30 rounded-3xl p-8 hover:bg-purple-900/30 hover:border-purple-400/40 hover:scale-105 transition-all duration-300 shadow-lg shadow-purple-900/20">
+              <div className="bg-gradient-to-br from-purple-400 to-fuchsia-500 w-14 h-14 rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-purple-500/30">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+              </div>
+              <h3 className="text-white text-xl font-bold mb-4">AI-Powered Predictions</h3>
+              <p className="text-white/70 leading-relaxed font-light">
+                Advanced machine learning algorithms analyze hydrological data to predict urban floods with unprecedented accuracy and precision.
+              </p>
+            </div>
+
+            {/* Card 2 */}
+            <div className="bg-purple-900/20 backdrop-blur-xl border border-purple-400/30 rounded-3xl p-8 hover:bg-purple-900/30 hover:border-purple-400/40 hover:scale-105 transition-all duration-300 shadow-lg shadow-purple-900/20">
+              <div className="bg-gradient-to-br from-fuchsia-400 to-pink-500 w-14 h-14 rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-fuchsia-500/30">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </div>
+              <h3 className="text-white text-xl font-bold mb-4">Hyperlocal Precision</h3>
+              <p className="text-white/70 leading-relaxed font-light">
+                Street-level flood forecasting enables targeted alerts and emergency response, protecting communities at a granular level.
+              </p>
+            </div>
+
+            {/* Card 3 */}
+            <div className="bg-purple-900/20 backdrop-blur-xl border border-purple-400/30 rounded-3xl p-8 hover:bg-purple-900/30 hover:border-purple-400/40 hover:scale-105 transition-all duration-300 shadow-lg shadow-purple-900/20">
+              <div className="bg-gradient-to-br from-pink-400 to-purple-500 w-14 h-14 rounded-2xl flex items-center justify-center mb-6 shadow-lg shadow-pink-500/30">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                </svg>
+              </div>
+              <h3 className="text-white text-xl font-bold mb-4">Resilient Cities</h3>
+              <p className="text-white/70 leading-relaxed font-light">
+                Empowering urban planners and residents with real-time data to build safer, more resilient communities for the future.
+              </p>
+            </div>
+          </div>
+
+          {/* Stats Section */}
+          <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-6">
+            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
+              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-300 to-fuchsia-400 mb-2">98%</div>
+              <div className="text-white/70 text-sm md:text-base font-light">Accuracy Rate</div>
+            </div>
+            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
+              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-300 to-pink-400 mb-2">24/7</div>
+              <div className="text-white/70 text-sm md:text-base font-light">Monitoring</div>
+            </div>
+            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
+              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-pink-300 to-purple-400 mb-2">15m</div>
+              <div className="text-white/70 text-sm md:text-base font-light">Resolution</div>
+            </div>
+            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
+              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-fuchsia-400 mb-2">&lt;5s</div>
+              <div className="text-white/70 text-sm md:text-base font-light">Response Time</div>
+            </div>
+          </div>
         </div>
       </div>
+
     </div>
   )
 }
