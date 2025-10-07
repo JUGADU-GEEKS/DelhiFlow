@@ -1,0 +1,11 @@
+geopandas
+shapely
+pandas
+numpy
+rasterio
+osmnx
+requests
+python-dotenv
+pyarrow
+rtree
+fastparquet
