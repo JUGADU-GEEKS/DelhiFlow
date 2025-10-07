@@ -1,9 +1,65 @@
 import React from 'react';
 import Squares from './Squares';
-import Navbar from './Navbar';
+import Dock from './Dock';
 import ShinyText from './ShinyText';
+import ChromaGrid from './ChromaGrid';
+import { VscHome, VscArchive, VscAccount, VscSettingsGear, VscGitMerge } from 'react-icons/vsc';
+import kunalImage from '../../public/kunal.jpg';
+import sangyaImage from '../../public/sangya.jpg';
+import dhruvImage from '../../public/dhruv.jpg';
 
 function Landing() {
+  const scrollToSection = (sectionId) => {
+    const element = document.getElementById(sectionId);
+    if (element) {
+      const offset = 100; // Account for fixed dock height
+      const elementPosition = element.getBoundingClientRect().top;
+      const offsetPosition = elementPosition + window.pageYOffset - offset;
+      
+      window.scrollTo({
+        top: offsetPosition,
+        behavior: 'smooth'
+      });
+    }
+  };
+
+  const dockItems = [
+    { icon: <VscHome size={24} />, label: 'Home', onClick: () => window.scrollTo({ top: 0, behavior: 'smooth' }) },
+    { icon: <VscArchive size={24} />, label: 'About', onClick: () => scrollToSection('about-section') },
+    { icon: <VscAccount size={24} />, label: 'Team', onClick: () => scrollToSection('team-section') },
+    { icon: <VscGitMerge size={24} />, label: 'Star Repo', onClick: () => window.open('https://github.com/JUGADU-GEEKS/DelhiFlow', '_blank') },
+  ];
+
+  const teamMembers = [
+    {
+      image: kunalImage,
+      title: "Kunal Sharma",
+      subtitle: "Full Stack Developer",
+      handle: "@kunnusherry",
+      borderColor: "#9a69b5",
+      gradient: "linear-gradient(145deg, #9a69b5, #000)",
+      url: "https://kunal-portfolio-lemon.vercel.app/"
+    },
+    {
+      image: sangyaImage,
+      title: "Sangya Ojha",
+      subtitle: "Full Stack Developer",
+      handle: "@sangya-25",
+      borderColor: "#c247ac",
+      gradient: "linear-gradient(180deg, #c247ac, #000)",
+      url: "https://portfolio-sangya.vercel.app/"
+    },
+    {
+      image: dhruvImage,
+      title: "Dhruv Sharma",
+      subtitle: "Full Stack Developer",
+      handle: "@dhruv0050",
+      borderColor: "#d856bf",
+      gradient: "linear-gradient(210deg, #d856bf, #000)",
+      url: "https://dhruvs-portfolio-khaki.vercel.app/"
+    }
+  ];
+
   return (
     <div className="relative w-full min-h-screen overflow-x-hidden overflow-y-auto font-['Poppins',sans-serif]" style={{ background: '#000000' }}>
       {/* Squares background */}
@@ -17,14 +73,22 @@ function Landing() {
         />
       </div>
 
-      {/* Navigation Bar */}
-      <Navbar />
+      {/* Dock Navigation */}
+      <div className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4">
+        <Dock 
+          items={dockItems}
+          panelHeight={68}
+          baseItemSize={50}
+          magnification={70}
+          className="bg-purple-900/20 backdrop-blur-xl"
+        />
+      </div>
 
       {/* Main Content */}
       <div className="relative z-10 flex flex-col items-center justify-center min-h-screen px-4 -mt-24">
 
         {/* Main Heading */}
-        <div className="text-center mb-16 max-w-5xl">
+        <div className="text-center mt-50 mb-16 max-w-5xl">
           <ShinyText
             text="Delhi Flow"
             disabled={false}
@@ -49,7 +113,7 @@ function Landing() {
       </div>
 
       {/* About Section */}
-      <div className="relative z-10 px-4 py-20">
+      <div id="about-section" className="relative z-10 px-4 py-20">
         <div className="max-w-7xl mx-auto">
           {/* Section Title */}
           <div className="text-center mb-16">
@@ -104,24 +168,32 @@ function Landing() {
             </div>
           </div>
 
-          {/* Stats Section */}
-          <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-6">
-            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
-              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-300 to-fuchsia-400 mb-2">98%</div>
-              <div className="text-white/70 text-sm md:text-base font-light">Accuracy Rate</div>
-            </div>
-            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
-              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-300 to-pink-400 mb-2">24/7</div>
-              <div className="text-white/70 text-sm md:text-base font-light">Monitoring</div>
-            </div>
-            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
-              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-pink-300 to-purple-400 mb-2">15m</div>
-              <div className="text-white/70 text-sm md:text-base font-light">Resolution</div>
-            </div>
-            <div className="text-center p-6 bg-purple-900/10 backdrop-blur-md border border-purple-400/20 rounded-2xl hover:border-purple-400/30 transition-all duration-300">
-              <div className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-fuchsia-400 mb-2">&lt;5s</div>
-              <div className="text-white/70 text-sm md:text-base font-light">Response Time</div>
-            </div>
+        </div>
+      </div>
+
+      {/* Team Section */}
+      <div id="team-section" className="relative z-10 px-4 py-20">
+        <div className="max-w-7xl mx-auto">
+          {/* Section Title */}
+          <div className="text-center mb-16">
+            <h2 className="text-transparent bg-clip-text bg-gradient-to-r from-purple-300 via-fuchsia-400 to-pink-400 text-4xl md:text-5xl lg:text-6xl font-bold mb-6">
+              Meet Our Team
+            </h2>
+            <p className="text-white/70 text-lg md:text-xl max-w-2xl mx-auto font-light">
+              The brilliant minds behind Delhi Flow's innovative flood forecasting technology
+            </p>
+          </div>
+
+          {/* ChromaGrid Team Cards */}
+          <div style={{ minHeight: '500px', position: 'relative' }}>
+            <ChromaGrid 
+              items={teamMembers}
+              radius={350}
+              damping={0.45}
+              fadeOut={0.6}
+              ease="power3.out"
+              className="pb-10"
+            />
           </div>
         </div>
       </div>
