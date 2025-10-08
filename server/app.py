@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Form, File, UploadFile
 from pydantic import BaseModel, conlist
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +9,8 @@ import pandas as pd
 import traceback
 import datetime
 from dateutil import parser as dtparser
+from ultralytics import YOLO
+import cv2
 
 try:
     from .grid_index import lookup_grid_id, is_available as grid_index_available  # type: ignore
@@ -31,14 +33,29 @@ _DATA_DF = None
 
 app = FastAPI(title="DelhiFlow - Prediction API")
 
-# Allow requests from the frontend dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"],  # dev only
+    allow_credentials=False,  # avoid wildcard + credentials conflict
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount potholes router
+try:
+    from .potholes import router as potholes_router  # when running as package
+except Exception:
+    try:
+        from potholes import router as potholes_router  # when running as module
+    except Exception:
+        potholes_router = None
+
+if potholes_router:
+    app.include_router(potholes_router, prefix="/potholes", tags=["potholes"])
+    print("[ROUTER] Mounted potholes router at /potholes")
+else:
+    print("[ROUTER] Potholes router NOT mounted")
+# ---------------------------------------------------
 
 
 class GridInput(BaseModel):
@@ -462,3 +479,104 @@ def predict_location_time(payload: LocationTimeRequest):
     except Exception as ex:
         tb = traceback.format_exc()
         raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+# --- Pothole detection endpoint ---
+# Try to load a dedicated pothole model if available, otherwise reuse YOLO model
+POTHOLE_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model', 'potholes.pt')
+POTHOLE_MODEL = None
+try:
+    if os.path.exists(POTHOLE_MODEL_PATH):
+        POTHOLE_MODEL = YOLO(POTHOLE_MODEL_PATH)
+        print(f"[MODEL] Loaded pothole model from {POTHOLE_MODEL_PATH}")
+    else:
+        # Fallback to general model if specific pothole model not found
+        POTHOLE_MODEL = YOLO(MODEL_PATH)
+        print(f"[MODEL] Pothole model not found, falling back to {MODEL_PATH}")
+except Exception as e:
+    POTHOLE_MODEL = None
+    print(f"[MODEL] Failed to load pothole model: {e}")
+
+
+@app.post('/analyze_issue')
+async def analyze_issue(lat: float = Form(None), lon: float = Form(None), file: UploadFile = File(...)):
+    """Analyze uploaded image/video for potholes. Returns detection status and provided coordinates.
+    - Accepts a multipart/form-data file (image or video)
+    - Optional form fields: lat, lon (floats)
+    """
+    # Validate file type
+    content_type = file.content_type
+    if not content_type or (not content_type.startswith('image/') and not content_type.startswith('video/')):
+        raise HTTPException(status_code=400, detail='Invalid file type. Upload an image or video.')
+
+    if POTHOLE_MODEL is None:
+        raise HTTPException(status_code=500, detail='Pothole model not available on server')
+
+    # Read file bytes
+    data = await file.read()
+
+    # For images - load using cv2.imdecode
+    if content_type.startswith('image/'):
+        np_arr = np.frombuffer(data, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail='Could not decode image')
+
+        # Run inference
+        try:
+            results = POTHOLE_MODEL(img)
+        except Exception as e:
+            print(f"[ANALYZE] Model inference failed: {e}")
+            raise HTTPException(status_code=500, detail='Model inference failed')
+
+        # Check detections for pothole class
+        detections = results[0].boxes
+        pothole_detected = False
+        pothole_boxes = []
+        # Try to detect by name if names are available, otherwise check for class id 0 assumption
+        names = results[0].names if hasattr(results[0], 'names') else {}
+        for box in detections:
+            cls = int(box.cls[0])
+            conf = float(box.conf[0]) if hasattr(box, 'conf') else None
+            label = names.get(cls, str(cls)) if isinstance(names, dict) else str(cls)
+            # Consider 'pothole' label or class id 0 as pothole (fallback)
+            if str(label).lower() == 'pothole' or cls == 0:
+                pothole_detected = True
+                x1, y1, x2, y2 = map(float, box.xyxy[0]) if hasattr(box, 'xyxy') else (0,0,0,0)
+                pothole_boxes.append({'bbox': [x1, y1, x2, y2], 'confidence': conf, 'class': cls, 'label': label})
+
+    else:
+        # For videos: save temporarily and analyze first frame
+        try:
+            tmp_path = os.path.join(os.path.dirname(__file__), 'temp_upload')
+            os.makedirs(tmp_path, exist_ok=True)
+            tmp_file = os.path.join(tmp_path, file.filename)
+            with open(tmp_file, 'wb') as f:
+                f.write(data)
+            cap = cv2.VideoCapture(tmp_file)
+            ret, frame = cap.read()
+            cap.release()
+            os.remove(tmp_file)
+            if not ret or frame is None:
+                raise HTTPException(status_code=400, detail='Could not read video frame')
+
+            results = POTHOLE_MODEL(frame)
+            detections = results[0].boxes
+            pothole_detected = False
+            pothole_boxes = []
+            names = results[0].names if hasattr(results[0], 'names') else {}
+            for box in detections:
+                cls = int(box.cls[0])
+                conf = float(box.conf[0]) if hasattr(box, 'conf') else None
+                label = names.get(cls, str(cls)) if isinstance(names, dict) else str(cls)
+                if str(label).lower() == 'pothole' or cls == 0:
+                    pothole_detected = True
+                    x1, y1, x2, y2 = map(float, box.xyxy[0]) if hasattr(box, 'xyxy') else (0,0,0,0)
+                    pothole_boxes.append({'bbox': [x1, y1, x2, y2], 'confidence': conf, 'class': cls, 'label': label})
+
+  
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[ANALYZE VIDEO] Failed: {e}")
+            raise HTTPException(status_code=500, detail='Video analysis failed')
+

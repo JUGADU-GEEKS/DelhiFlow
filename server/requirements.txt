@@ -14,3 +14,6 @@ uvicorn
 scikit-learn
 joblib
 python-dateutil
+pillow
+ultralytics
+opencv-python
