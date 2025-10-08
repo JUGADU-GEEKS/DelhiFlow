@@ -1,10 +1,26 @@
 from __future__ import annotations
 import io, os
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
+
+# --- Dedicated pothole model loading logic ---
+POTHOLE_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model', 'potholes.pt')
+GENERAL_MODEL_PATH = os.getenv("POTHOLES_MODEL_PATH", "yolov8n.pt")
+POTHOLE_MODEL = None
+try:
+    from ultralytics import YOLO  # type: ignore
+    if os.path.exists(POTHOLE_MODEL_PATH):
+        POTHOLE_MODEL = YOLO(POTHOLE_MODEL_PATH)
+        print(f"[MODEL] Loaded pothole model from {POTHOLE_MODEL_PATH}")
+    else:
+        POTHOLE_MODEL = YOLO(GENERAL_MODEL_PATH)
+        print(f"[MODEL] Pothole model not found, falling back to {GENERAL_MODEL_PATH}")
+except Exception as e:
+    POTHOLE_MODEL = None
+    print(f"[MODEL] Failed to load pothole model: {e}")
 
 _MODEL = None
 _MODEL_NAMES = None
@@ -147,3 +163,107 @@ async def detect_potholes(image: UploadFile = File(None), file: UploadFile = Fil
         engine = "dummy"
 
     return {"detections": detections, "image_size": {"width": w, "height": h}, "engine": engine}
+
+@router.post('/analyze_issue')
+async def analyze_issue(
+    lat: float = Form(None),
+    lon: float = Form(None),
+    file: UploadFile = File(...)
+):
+    """
+    Analyze uploaded image/video for potholes. Returns detection status and provided coordinates.
+    - Accepts a multipart/form-data file (image or video)
+    - Optional form fields: lat, lon (floats)
+    """
+    import numpy as np, cv2
+    # Validate file type
+    content_type = file.content_type
+    if not content_type or (not content_type.startswith('image/') and not content_type.startswith('video/')):
+        raise HTTPException(status_code=400, detail='Invalid file type. Upload an image or video.')
+
+    if POTHOLE_MODEL is None:
+        raise HTTPException(status_code=500, detail='Pothole model not available on server')
+
+    data = await file.read()
+
+    if content_type.startswith('image/'):
+        np_arr = np.frombuffer(data, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail='Could not decode image')
+        try:
+            results = POTHOLE_MODEL(img)
+        except Exception as e:
+            print(f"[ANALYZE] Model inference failed: {e}")
+            raise HTTPException(status_code=500, detail='Model inference failed')
+        detections = results[0].boxes
+        pothole_detected = False
+        pothole_boxes = []
+        names = results[0].names if hasattr(results[0], 'names') else {}
+        for box in detections:
+            cls = int(box.cls[0])
+            conf = float(box.conf[0]) if hasattr(box, 'conf') else None
+            label = names.get(cls, str(cls)) if isinstance(names, dict) else str(cls)
+            if str(label).lower() == 'pothole' or cls == 0:
+                pothole_detected = True
+                x1, y1, x2, y2 = map(float, box.xyxy[0]) if hasattr(box, 'xyxy') else (0,0,0,0)
+                pothole_boxes.append({'bbox': [x1, y1, x2, y2], 'confidence': conf, 'class': cls, 'label': label})
+        report_sent = False
+        if pothole_detected:
+            try:
+                report_sent = send_pothole_report(lat, lon, pothole_boxes)
+            except Exception as e:
+                print(f"[ANALYZE] Error sending report email: {e}")
+        response = {
+            'pothole_detected': pothole_detected,
+            'pothole_boxes': pothole_boxes,
+            'coordinates': {'lat': lat, 'lon': lon},
+            'report_sent': report_sent
+        }
+        return response
+
+    else:
+        # For videos: save temporarily and analyze first frame
+        try:
+            tmp_path = os.path.join(os.path.dirname(__file__), 'temp_upload')
+            os.makedirs(tmp_path, exist_ok=True)
+            tmp_file = os.path.join(tmp_path, file.filename)
+            with open(tmp_file, 'wb') as f:
+                f.write(data)
+            cap = cv2.VideoCapture(tmp_file)
+            ret, frame = cap.read()
+            cap.release()
+            os.remove(tmp_file)
+            if not ret or frame is None:
+                raise HTTPException(status_code=400, detail='Could not read video frame')
+            results = POTHOLE_MODEL(frame)
+            detections = results[0].boxes
+            pothole_detected = False
+            pothole_boxes = []
+            names = results[0].names if hasattr(results[0], 'names') else {}
+            for box in detections:
+                cls = int(box.cls[0])
+                conf = float(box.conf[0]) if hasattr(box, 'conf') else None
+                label = names.get(cls, str(cls)) if isinstance(names, dict) else str(cls)
+                if str(label).lower() == 'pothole' or cls == 0:
+                    pothole_detected = True
+                    x1, y1, x2, y2 = map(float, box.xyxy[0]) if hasattr(box, 'xyxy') else (0,0,0,0)
+                    pothole_boxes.append({'bbox': [x1, y1, x2, y2], 'confidence': conf, 'class': cls, 'label': label})
+            report_sent = False
+            if pothole_detected:
+                try:
+                    report_sent = send_pothole_report(lat, lon, pothole_boxes)
+                except Exception as e:
+                    print(f"[ANALYZE VIDEO] Error sending report email: {e}")
+            response = {
+                'pothole_detected': pothole_detected,
+                'pothole_boxes': pothole_boxes,
+                'coordinates': {'lat': lat, 'lon': lon},
+                'report_sent': report_sent
+            }
+            return response
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[ANALYZE VIDEO] Failed: {e}")
+            raise HTTPException(status_code=500, detail='Video analysis failed')
