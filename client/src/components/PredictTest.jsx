@@ -85,27 +85,37 @@ function PredictTest() {
   };
 
   const predictFromLocation = async (latitude, longitude) => {
-    // use configured API base (avoid relative fetch to frontend dev server)
-    const url = `${API_BASE.replace(/\/$/, '')}/predict_location`;
+    // Prefer dataset-driven endpoint that accounts for time + grid mapping
+    const base = API_BASE.replace(/\/$/, '');
+    const urlTime = `${base}/predict_location_time`;
+    const urlLegacy = `${base}/predict_location`;
     try {
-      const response = await fetch(url, {
+      const timestamp = new Date().toISOString();
+      let response = await fetch(urlTime, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ latitude, longitude }),
+        body: JSON.stringify({ latitude, longitude, timestamp }),
       });
 
       if (!response.ok) {
-        // try to read response body (could be text/html from dev server or JSON)
-        const text = await response.text();
-        let parsed;
-        try { parsed = JSON.parse(text); } catch(e) { parsed = text; }
-        const detail = parsed && parsed.detail ? parsed.detail : (typeof parsed === 'string' ? parsed : JSON.stringify(parsed));
-        const msg = `Prediction API error: HTTP ${response.status} - ${detail}`;
-        console.error(msg, parsed);
-        setError(msg);
-        return;
+        // fallback to legacy endpoint (without grid lookup)
+        response = await fetch(urlLegacy, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ latitude, longitude })
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          let parsed;
+          try { parsed = JSON.parse(text); } catch(e) { parsed = text; }
+          const detail = parsed && parsed.detail ? parsed.detail : (typeof parsed === 'string' ? parsed : JSON.stringify(parsed));
+          const msg = `Prediction API error: HTTP ${response.status} - ${detail}`;
+          console.error(msg, parsed);
+          setError(msg);
+          return;
+        }
       }
 
       // parse JSON safely

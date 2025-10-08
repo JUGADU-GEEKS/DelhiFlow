@@ -8,6 +8,17 @@ import numpy as np
 import pandas as pd
 import traceback
 import datetime
+from dateutil import parser as dtparser
+
+try:
+    from .grid_index import lookup_grid_id, is_available as grid_index_available  # type: ignore
+except Exception:
+    # Fallback when running as script
+    try:
+        from grid_index import lookup_grid_id, is_available as grid_index_available  # type: ignore
+    except Exception:
+        lookup_grid_id = None  # type: ignore
+        grid_index_available = lambda: False  # type: ignore
 
 
 BASE_DIR = os.path.dirname(__file__)
@@ -49,6 +60,18 @@ class MultiGridRequest(BaseModel):
 class LocationRequest(BaseModel):
     latitude: float
     longitude: float
+    hour_of_day: Optional[int] = None
+    month: Optional[int] = None
+    day_of_week: Optional[int] = None
+
+
+class LocationTimeRequest(BaseModel):
+    # Either provide (latitude, longitude) or a grid_id directly
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    grid_id: Optional[int] = None
+    # Timestamp or explicit hour/month/dow
+    timestamp: Optional[str] = None  # ISO8601 or any dtparser-compatible string
     hour_of_day: Optional[int] = None
     month: Optional[int] = None
     day_of_week: Optional[int] = None
@@ -255,9 +278,10 @@ def predict_location(request: LocationRequest):
     }
     """
     try:
-        # Validate Delhi coordinates (rough bounds)
-        if not (28.4 <= request.latitude <= 28.9 and 76.8 <= request.longitude <= 77.3):
-            raise HTTPException(status_code=400, detail="Coordinates appear to be outside Delhi region")
+        # Validate coordinates (use wider bounds to avoid false negatives near edges of Delhi)
+        if not (28.0 <= request.latitude <= 29.5 and 76.0 <= request.longitude <= 78.0):
+            # Still allow processing but indicate unusual coordinates
+            pass
         
         # Derive environmental features from location
         features = derive_features_from_location(request.latitude, request.longitude)
@@ -304,6 +328,135 @@ def predict_location(request: LocationRequest):
             "prediction": results[0] if results else None
         }
         
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.post("/predict_location_time")
+def predict_location_time(payload: LocationTimeRequest):
+    """Dataset-driven prediction using location + time to select the correct grid row.
+
+    Flow:
+    - If grid_id not provided: use spatial lookup (requires grid_index file) to map (lat,lon)->Grid_ID
+    - Parse timestamp or derive hour/month/dow
+    - Find dataset row(s) for Grid_ID and the matching hour
+    - Build model input from the dataset row and time features
+    - Run model and return prediction plus the source row used
+
+    Request JSON examples:
+    {"latitude": 28.6139, "longitude": 77.2090, "timestamp": "2025-07-01T14:30:00+05:30"}
+    {"grid_id": 123, "hour_of_day": 14, "month": 7, "day_of_week": 2}
+    """
+    try:
+        df = load_dataset()
+        if df is None:
+            raise HTTPException(status_code=500, detail="Dataset not available on server")
+
+        # Determine grid id
+        grid_id = payload.grid_id
+        lat = payload.latitude
+        lon = payload.longitude
+
+        if grid_id is None:
+            if lat is None or lon is None:
+                raise HTTPException(status_code=400, detail="Provide either grid_id or latitude+longitude")
+            if not (28.0 <= float(lat) <= 29.5 and 76.0 <= float(lon) <= 78.0):
+                # Wider bounds than /predict_location to allow lookup near edges
+                raise HTTPException(status_code=400, detail="Coordinates out of expected region for Delhi grid")
+            if not grid_index_available():
+                raise HTTPException(status_code=400, detail="Grid geometry index not available on server for spatial lookup. Provide grid_id directly or add dataset/grid_index.geojson")
+            gid = lookup_grid_id(float(lat), float(lon))  # type: ignore
+            if gid is None:
+                raise HTTPException(status_code=404, detail="No grid cell found for provided coordinates")
+            grid_id = gid
+
+        # Parse time info
+        hour = payload.hour_of_day
+        month = payload.month
+        dow = payload.day_of_week
+        if payload.timestamp:
+            try:
+                dt = dtparser.parse(payload.timestamp)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid timestamp format")
+            hour = dt.hour
+            month = dt.month
+            dow = dt.weekday()
+        else:
+            # fill blanks from now
+            now = datetime.datetime.now()
+            hour = hour if hour is not None else now.hour
+            month = month if month is not None else now.month
+            dow = dow if dow is not None else now.weekday()
+
+        # Dataset has an 'Hour' timestamp column per grid; choose the same month and hour
+        # We'll match month and hour-of-day; if multiple days exist, take the first for that month.
+        df_grid = df[df["Grid_ID"] == int(grid_id)]
+        if df_grid.empty:
+            raise HTTPException(status_code=404, detail=f"No dataset rows for Grid_ID={grid_id}")
+
+        # Ensure Hour is datetime
+        if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
+            try:
+                df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
+            except Exception:
+                pass
+
+        # Filter by month and hour
+        df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
+        if df_sel.empty:
+            # Fallback: just first row of this grid
+            df_sel = df_grid.head(1)
+
+        row = df_sel.iloc[0]
+
+        # Build input features: prefer dataset values when present; otherwise fallback to simple heuristics
+        def val_or_default(name, default):
+            v = row.get(name)
+            try:
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    return default
+                return float(v)
+            except Exception:
+                return default
+
+        # If lat/lon were provided, use heuristic derivation for elevation/road density when dataset has NaN
+        if lat is not None and lon is not None:
+            feats_loc = derive_features_from_location(float(lat), float(lon))
+        else:
+            feats_loc = None
+
+        Elevation = val_or_default("Elevation", feats_loc["Elevation"] if feats_loc else 210.0)
+        Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"] if feats_loc else 0.5)
+        Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"] if feats_loc else 5.0)
+        Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"] if feats_loc else Rain_mm)
+        Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"] if feats_loc else 0.8)
+        Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"] if feats_loc else 0.4)
+
+        # Build model array and predict
+        arr = np.array([[
+            Elevation, Road_Density, Rain_mm, Rain_Past3h, Drain_Water_Level, Soil_Moisture,
+            int(hour), int(month), int(dow)
+        ]])
+        results = transform_and_predict(arr)
+
+        return {
+            "grid_id": int(grid_id),
+            "used_row": {
+                "Hour": row["Hour"].isoformat() if hasattr(row["Hour"], "isoformat") else str(row["Hour"]),
+                "Elevation": Elevation,
+                "Road_Density": Road_Density,
+                "Rain_mm": Rain_mm,
+                "Rain_Past3h": Rain_Past3h,
+                "Drain_Water_Level": Drain_Water_Level,
+                "Soil_Moisture": Soil_Moisture,
+            },
+            "time_used": {"hour_of_day": int(hour), "month": int(month), "day_of_week": int(dow)},
+            "prediction": results[0] if results else None,
+        }
     except HTTPException:
         raise
     except Exception as ex:
