@@ -3,10 +3,11 @@ import Squares from './Squares';
 import Dock from './Dock';
 import ShinyText from './ShinyText';
 import ChromaGrid from './ChromaGrid';
-import { VscHome, VscArchive, VscAccount, VscSettingsGear, VscGitMerge } from 'react-icons/vsc';
+import { VscHome, VscArchive, VscAccount, VscGithubInverted } from 'react-icons/vsc';
 import kunalImage from '../../public/kunal.jpg';
 import sangyaImage from '../../public/sangya.jpg';
 import dhruvImage from '../../public/dhruv.jpg';
+import { Link } from 'react-router-dom';
 
 function Landing() {
   const scrollToSection = (sectionId) => {
@@ -27,7 +28,7 @@ function Landing() {
     { icon: <VscHome size={24} />, label: 'Home', onClick: () => window.scrollTo({ top: 0, behavior: 'smooth' }) },
     { icon: <VscArchive size={24} />, label: 'About', onClick: () => scrollToSection('about-section') },
     { icon: <VscAccount size={24} />, label: 'Team', onClick: () => scrollToSection('team-section') },
-    { icon: <VscGitMerge size={24} />, label: 'Star Repo', onClick: () => window.open('https://github.com/JUGADU-GEEKS/DelhiFlow', '_blank') },
+    { icon: <VscGithubInverted size={24} />, label: 'GitHub', onClick: () => window.open('https://github.com/JUGADU-GEEKS/DelhiFlow', '_blank') },
   ];
 
   const teamMembers = [
@@ -103,7 +104,7 @@ function Landing() {
 
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row items-center gap-5">
-          <button className="bg-white text-black px-10 py-4 rounded-full font-semibold hover:bg-purple-50 hover:scale-105 transition-all duration-200 text-lg shadow-lg shadow-purple-500/20 min-w-[160px]">
+          <button className="bg-white text-black px-10 py-4 rounded-full font-semibold hover:bg-purple-50 hover:scale-105 transition-all duration-200 text-lg shadow-lg shadow-purple-500/20 min-w-[160px]" onClick={() => window.location.href = '/predict'}>
             Get Started
           </button>
           <button className="bg-purple-600/20 backdrop-blur-md border-2 border-purple-400/30 text-white px-10 py-4 rounded-full font-semibold hover:bg-purple-600/30 hover:border-purple-400/50 hover:scale-105 transition-all duration-200 text-lg min-w-[160px]">

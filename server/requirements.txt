@@ -9,3 +9,7 @@ python-dotenv
 pyarrow
 rtree
 fastparquet
+fastapi
+uvicorn
+scikit-learn
+joblib
