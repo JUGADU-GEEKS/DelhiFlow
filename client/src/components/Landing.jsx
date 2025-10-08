@@ -104,7 +104,7 @@ function Landing() {
 
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row items-center gap-5">
-          <button className="bg-white text-black px-10 py-4 rounded-full font-semibold hover:bg-purple-50 hover:scale-105 transition-all duration-200 text-lg shadow-lg shadow-purple-500/20 min-w-[160px]" onClick={() => window.location.href = '/predict'}>
+          <button className="bg-white text-black px-10 py-4 rounded-full font-semibold hover:bg-purple-50 hover:scale-105 transition-all duration-200 text-lg shadow-lg shadow-purple-500/20 min-w-[160px]" onClick={() => window.location.href = '/test-predict'}>
             Get Started
           </button>
           <button className="bg-purple-600/20 backdrop-blur-md border-2 border-purple-400/30 text-white px-10 py-4 rounded-full font-semibold hover:bg-purple-600/30 hover:border-purple-400/50 hover:scale-105 transition-all duration-200 text-lg min-w-[160px]">
