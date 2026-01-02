@@ -89,7 +89,7 @@ function Landing() {
       <div className="relative z-10 flex flex-col items-center justify-center min-h-screen px-4 -mt-24">
 
         {/* Main Heading */}
-        <div className="text-center mt-50 mb-16 max-w-5xl">
+        <div className="text-center mt-60 mb-16 max-w-5xl">
           <ShinyText
             text="Delhi Flow"
             disabled={false}

@@ -13,14 +13,29 @@ from ultralytics import YOLO
 import cv2
 
 try:
-    from .grid_index import lookup_grid_id, is_available as grid_index_available  # type: ignore
+    from .grid_index import (lookup_grid_id, is_available as grid_index_available,  # type: ignore
+                             lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info)  # type: ignore
 except Exception:
     # Fallback when running as script
     try:
-        from grid_index import lookup_grid_id, is_available as grid_index_available  # type: ignore
+        from grid_index import (lookup_grid_id, is_available as grid_index_available,  # type: ignore
+                               lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info)  # type: ignore
     except Exception:
         lookup_grid_id = None  # type: ignore
         grid_index_available = lambda: False  # type: ignore
+        lookup_ward_id = None  # type: ignore
+        is_ward_available = lambda: False  # type: ignore
+        get_grids_in_ward = None  # type: ignore
+        get_ward_info = None  # type: ignore
+
+try:
+    from .ward_aggregation import WardAggregator, create_ward_prediction_summary  # type: ignore
+except Exception:
+    try:
+        from ward_aggregation import WardAggregator, create_ward_prediction_summary  # type: ignore
+    except Exception:
+        WardAggregator = None  # type: ignore
+        create_ward_prediction_summary = None  # type: ignore
 
 
 BASE_DIR = os.path.dirname(__file__)
@@ -92,6 +107,17 @@ class LocationTimeRequest(BaseModel):
     hour_of_day: Optional[int] = None
     month: Optional[int] = None
     day_of_week: Optional[int] = None
+
+
+class WardPredictionRequest(BaseModel):
+    """Request model for ward-level flood risk prediction."""
+    latitude: float
+    longitude: float
+    timestamp: Optional[str] = None  # ISO8601 or any dtparser-compatible string
+    hour_of_day: Optional[int] = None
+    month: Optional[int] = None
+    day_of_week: Optional[int] = None
+    aggregation_method: Optional[str] = "mean"  # mean, max, median, percentile_75, percentile_90
 
 
 def load_artifacts():
@@ -580,3 +606,290 @@ async def analyze_issue(lat: float = Form(None), lon: float = Form(None), file: 
             print(f"[ANALYZE VIDEO] Failed: {e}")
             raise HTTPException(status_code=500, detail='Video analysis failed')
 
+
+# ========================= WARD-LEVEL FLOOD RISK PREDICTION =======================
+
+
+@app.post("/predict_ward")
+def predict_ward(request: WardPredictionRequest):
+    """Predict flood risk at WARD level based on user location.
+    
+    This endpoint:
+    1. Finds the ward containing the user's coordinates
+    2. Gets all grids within that ward
+    3. Predicts flood risk for each grid
+    4. Aggregates predictions to ward-level summary
+    
+    Request JSON:
+    {
+      "latitude": 28.6139,
+      "longitude": 77.2090,
+      "timestamp": "2025-07-01T14:30:00+05:30",  // optional
+      "hour_of_day": 14,    // optional
+      "month": 8,           // optional
+      "day_of_week": 2,     // optional
+      "aggregation_method": "mean"  // optional: mean, max, median, percentile_75, percentile_90
+    }
+    
+    Response:
+    {
+      "Ward_ID": 5,
+      "Ward_Name": "Ward_5",
+      "Flood_Risk_Score": 0.65,
+      "Flood_Risk_Class": "Medium",
+      "Flood_Risk_Class_ID": 2,
+      "Grid_Count": 12,
+      "Risk_Distribution": {"High": 0.25, "Medium": 0.5, "Low": 0.25},
+      "location": {"latitude": 28.6139, "longitude": 77.2090},
+      "time_used": {"hour_of_day": 14, "month": 7, "day_of_week": 2}
+    }
+    """
+    try:
+        # Check if ward features are available
+        if not is_ward_available():
+            raise HTTPException(
+                status_code=400,
+                detail="Ward boundaries not available. Run create_ward_boundaries.py first."
+            )
+        
+        # Validate coordinates
+        if not (28.0 <= request.latitude <= 29.5 and 76.0 <= request.longitude <= 78.0):
+            raise HTTPException(
+                status_code=400,
+                detail="Coordinates out of expected region for Delhi"
+            )
+        
+        # Find ward containing this location
+        ward_id = lookup_ward_id(request.latitude, request.longitude)  # type: ignore
+        if ward_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No ward found for coordinates ({request.latitude}, {request.longitude})"
+            )
+        
+        # Get ward info
+        ward_info = get_ward_info(ward_id)  # type: ignore
+        ward_name = ward_info.get("Ward_Name") if ward_info else f"Ward_{ward_id}"
+        
+        # Get all grids in this ward
+        grid_ids = get_grids_in_ward(ward_id)  # type: ignore
+        if not grid_ids:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No grids found in Ward_ID {ward_id}"
+            )
+        
+        # Parse time info
+        now = datetime.datetime.now()
+        if request.timestamp:
+            try:
+                dt = dtparser.parse(request.timestamp)
+                hour = dt.hour
+                month = dt.month
+                dow = dt.weekday()
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid timestamp format")
+        else:
+            hour = request.hour_of_day if request.hour_of_day is not None else now.hour
+            month = request.month if request.month is not None else now.month
+            dow = request.day_of_week if request.day_of_week is not None else now.weekday()
+        
+        # Get predictions for all grids in the ward
+        df = load_dataset()
+        if df is None:
+            raise HTTPException(status_code=500, detail="Dataset not available on server")
+        
+        grid_predictions = {}  # grid_id -> risk_score
+        
+        for grid_id in grid_ids:
+            try:
+                # Get dataset rows for this grid
+                df_grid = df[df["Grid_ID"] == int(grid_id)]
+                if df_grid.empty:
+                    continue
+                
+                # Ensure Hour is datetime
+                if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
+                    try:
+                        df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
+                    except Exception:
+                        pass
+                
+                # Filter by month and hour
+                df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
+                if df_sel.empty:
+                    df_sel = df_grid.head(1)
+                
+                row = df_sel.iloc[0]
+                
+                # Extract features
+                def val_or_default(name, default):
+                    v = row.get(name)
+                    try:
+                        if v is None or (isinstance(v, float) and np.isnan(v)):
+                            return default
+                        return float(v)
+                    except Exception:
+                        return default
+                
+                # Derive features from location for missing values
+                feats_loc = derive_features_from_location(request.latitude, request.longitude)
+                
+                Elevation = val_or_default("Elevation", feats_loc["Elevation"])
+                Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
+                Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
+                Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
+                Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
+                Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
+                
+                # Predict
+                arr = np.array([[
+                    Elevation, Road_Density, Rain_mm, Rain_Past3h, Drain_Water_Level, Soil_Moisture,
+                    int(hour), int(month), int(dow)
+                ]])
+                
+                results = transform_and_predict(arr)
+                if results:
+                    # Convert class prediction to normalized score
+                    # class 0=High (0.8), 1=Low (0.2), 2=Medium (0.5)
+                    class_id = results[0]["class"]
+                    score = WardAggregator.class_to_score(class_id)  # type: ignore
+                    grid_predictions[grid_id] = score
+            
+            except Exception as e:
+                print(f"[PREDICT WARD] Error predicting grid {grid_id}: {e}")
+                continue
+        
+        # Aggregate predictions
+        if not grid_predictions:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not generate predictions for any grid in the ward"
+            )
+        
+        aggregation_method = request.aggregation_method or "mean"
+        summary = create_ward_prediction_summary(  # type: ignore
+            ward_id=ward_id,
+            ward_name=ward_name,
+            grid_predictions=grid_predictions,
+            aggregation_method=aggregation_method
+        )
+        
+        # Add location and time info
+        summary["location"] = {
+            "latitude": request.latitude,
+            "longitude": request.longitude
+        }
+        summary["time_used"] = {
+            "hour_of_day": int(hour),
+            "month": int(month),
+            "day_of_week": int(dow)
+        }
+        summary["aggregation_method"] = aggregation_method
+        
+        return summary
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        print(f"[PREDICT WARD] Error: {tb}")
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.get("/ward_info/{ward_id}")
+def get_ward_details(ward_id: int):
+    """Get information about a specific ward.
+    
+    Response:
+    {
+      "Ward_ID": 5,
+      "Ward_Name": "Ward_5",
+      "bounds": {
+        "min_lon": 77.05,
+        "min_lat": 28.6,
+        "max_lon": 77.15,
+        "max_lat": 28.7
+      },
+      "grid_count": 12
+    }
+    """
+    try:
+        if not is_ward_available():
+            raise HTTPException(
+                status_code=400,
+                detail="Ward boundaries not available"
+            )
+        
+        ward_info = get_ward_info(ward_id)  # type: ignore
+        if ward_info is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Ward {ward_id} not found"
+            )
+        
+        # Get grid count
+        grid_ids = get_grids_in_ward(ward_id)  # type: ignore
+        ward_info["grid_count"] = len(grid_ids)
+        
+        return ward_info
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.post("/predict_ward_batch")
+def predict_ward_batch(requests_list: List[WardPredictionRequest]):
+    """Predict flood risk for multiple locations at once.
+    
+    Request JSON:
+    [
+      {"latitude": 28.6139, "longitude": 77.2090, ...},
+      {"latitude": 28.5, "longitude": 77.1, ...}
+    ]
+    
+    Response:
+    {
+      "results": [
+        {"Ward_ID": 5, "Flood_Risk_Class": "Medium", ...},
+        {"Ward_ID": 3, "Flood_Risk_Class": "High", ...}
+      ],
+      "processed": 2,
+      "failed": 0
+    }
+    """
+    try:
+        results = []
+        failed = 0
+        
+        for req in requests_list:
+            try:
+                # Reuse single prediction logic
+                result = predict_ward(req)
+                results.append(result)
+            except HTTPException as he:
+                failed += 1
+                results.append({
+                    "error": he.detail,
+                    "location": {"latitude": req.latitude, "longitude": req.longitude}
+                })
+            except Exception as e:
+                failed += 1
+                results.append({
+                    "error": str(e),
+                    "location": {"latitude": req.latitude, "longitude": req.longitude}
+                })
+        
+        return {
+            "results": results,
+            "processed": len(results_list) - failed,
+            "failed": failed,
+            "total": len(requests_list)
+        }
+    
+    except Exception as ex:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})

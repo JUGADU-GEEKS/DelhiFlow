@@ -4,7 +4,6 @@ import Landing from './components/landing';
 import PredictTest from './components/PredictTest';
 import Predict from './components/Predict';
 import Potholes from './components/Potholes';
-
 function App() {
   return (
     <Router>
