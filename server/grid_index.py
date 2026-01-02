@@ -67,6 +67,10 @@ def _load_gdf(data_type: str = "grid", id_column: str = "Grid_ID"):
                 )
             # Ensure spatial index can be built
             _ = gdf.sindex  # builds/validates spatial index
+            # Keep all columns for ward data (preserves Ward_Name, etc.)
+            if data_type == "ward":
+                return gdf.copy()
+            # For grids, keep only essential columns
             return gdf[[id_column, "geometry"]].copy()
     raise FileNotFoundError(
         f"No {data_type} geometry file found. Provide one of: "
@@ -124,8 +128,32 @@ def lookup_grid_id(latitude: float, longitude: float) -> Optional[int]:
         return int(row["Grid_ID"])  # type: ignore
     return None
 
+def lookup_nearest_ward(latitude: float, longitude: float) -> Optional[int]:
+    """Return the Ward_ID whose geometry is nearest to the point.
+
+    This is used as a fallback when a point falls just outside polygons.
+    """
+    gdf = get_ward_gdf()
+    pt = geom.Point(float(longitude), float(latitude))
+    try:
+        nearest_idx = list(gdf.sindex.nearest(pt, num_results=1))
+        if nearest_idx:
+            row = gdf.iloc[nearest_idx[0]]
+            return int(row["Ward_ID"])  # type: ignore
+    except Exception:
+        # Fallback if spatial index nearest fails: use geometric distance
+        try:
+            distances = gdf.geometry.distance(pt)
+            min_idx = distances.idxmin()
+            row = gdf.loc[min_idx]
+            return int(row["Ward_ID"])  # type: ignore
+        except Exception:
+            return None
+    return None
+
+
 def lookup_ward_id(latitude: float, longitude: float) -> Optional[int]:
-    """Return Ward_ID containing the point (lat, lon), or None if not found.
+    """Return Ward_ID containing the point (lat, lon), or nearest ward if not found.
 
     Requires a ward geometry file to be present.
     """
@@ -133,15 +161,15 @@ def lookup_ward_id(latitude: float, longitude: float) -> Optional[int]:
     pt = geom.Point(float(longitude), float(latitude))  # note: (x,y) = (lon,lat)
     # fast bounding-box filter
     idxs = list(gdf.sindex.query(pt, predicate="intersects"))
-    if not idxs:
-        return None
-    cand = gdf.iloc[idxs]
-    # precise check
-    mask = cand.contains(pt)
-    if mask.any():
-        row = cand[mask].iloc[0]
-        return int(row["Ward_ID"])  # type: ignore
-    return None
+    if idxs:
+        cand = gdf.iloc[idxs]
+        mask = cand.contains(pt)
+        if mask.any():
+            row = cand[mask].iloc[0]
+            return int(row["Ward_ID"])  # type: ignore
+
+    # Fallback: nearest ward (covers edge cases/out-of-extent)
+    return lookup_nearest_ward(latitude, longitude)
 
 
 def get_grids_in_ward(ward_id: int) -> List[int]:

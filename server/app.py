@@ -659,8 +659,16 @@ def predict_ward(request: WardPredictionRequest):
                 detail="Coordinates out of expected region for Delhi"
             )
         
-        # Find ward containing this location
+        # Find ward containing this location; fallback to nearest ward if outside polygons
         ward_id = lookup_ward_id(request.latitude, request.longitude)  # type: ignore
+        lookup_method = "contains"
+        if ward_id is None:
+            try:
+                from .grid_index import lookup_nearest_ward  # type: ignore
+            except Exception:
+                from grid_index import lookup_nearest_ward  # type: ignore
+            ward_id = lookup_nearest_ward(request.latitude, request.longitude)  # type: ignore
+            lookup_method = "nearest"
         if ward_id is None:
             raise HTTPException(
                 status_code=404,
@@ -673,11 +681,6 @@ def predict_ward(request: WardPredictionRequest):
         
         # Get all grids in this ward
         grid_ids = get_grids_in_ward(ward_id)  # type: ignore
-        if not grid_ids:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No grids found in Ward_ID {ward_id}"
-            )
         
         # Parse time info
         now = datetime.datetime.now()
@@ -694,71 +697,102 @@ def predict_ward(request: WardPredictionRequest):
             month = request.month if request.month is not None else now.month
             dow = request.day_of_week if request.day_of_week is not None else now.weekday()
         
-        # Get predictions for all grids in the ward
+        # Get predictions for all grids in the ward, or fallback to single-point inference when none are mapped
         df = load_dataset()
         if df is None:
             raise HTTPException(status_code=500, detail="Dataset not available on server")
         
         grid_predictions = {}  # grid_id -> risk_score
-        
-        for grid_id in grid_ids:
-            try:
-                # Get dataset rows for this grid
-                df_grid = df[df["Grid_ID"] == int(grid_id)]
-                if df_grid.empty:
-                    continue
-                
-                # Ensure Hour is datetime
-                if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
-                    try:
-                        df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
-                    except Exception:
-                        pass
-                
-                # Filter by month and hour
-                df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
-                if df_sel.empty:
-                    df_sel = df_grid.head(1)
-                
-                row = df_sel.iloc[0]
-                
-                # Extract features
-                def val_or_default(name, default):
-                    v = row.get(name)
-                    try:
-                        if v is None or (isinstance(v, float) and np.isnan(v)):
+
+        if not grid_ids:
+            # Fallback: no grids mapped to this ward, infer risk directly at the given location
+            feats_loc = derive_features_from_location(request.latitude, request.longitude)
+            arr = np.array([
+                [
+                    feats_loc["Elevation"],
+                    feats_loc["Road_Density"],
+                    feats_loc["Rain_mm"],
+                    feats_loc["Rain_Past3h"],
+                    feats_loc["Drain_Water_Level"],
+                    feats_loc["Soil_Moisture"],
+                    int(hour),
+                    int(month),
+                    int(dow),
+                ]
+            ])
+            results = transform_and_predict(arr)
+            if results:
+                class_id = results[0]["class"]
+                score = WardAggregator.class_to_score(class_id)  # type: ignore
+                grid_predictions[-1] = score  # synthetic grid id for fallback
+        else:
+            for grid_id in grid_ids:
+                try:
+                    # Get dataset rows for this grid
+                    df_grid = df[df["Grid_ID"] == int(grid_id)]
+                    if df_grid.empty:
+                        continue
+                    
+                    # Ensure Hour is datetime
+                    if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
+                        try:
+                            df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
+                        except Exception:
+                            pass
+                    
+                    # Filter by month and hour
+                    df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
+                    if df_sel.empty:
+                        df_sel = df_grid.head(1)
+                    
+                    row = df_sel.iloc[0]
+                    
+                    # Extract features
+                    def val_or_default(name, default):
+                        v = row.get(name)
+                        try:
+                            if v is None or (isinstance(v, float) and np.isnan(v)):
+                                return default
+                            return float(v)
+                        except Exception:
                             return default
-                        return float(v)
-                    except Exception:
-                        return default
+                    
+                    # Derive features from location for missing values
+                    feats_loc = derive_features_from_location(request.latitude, request.longitude)
+                    
+                    Elevation = val_or_default("Elevation", feats_loc["Elevation"])
+                    Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
+                    Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
+                    Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
+                    Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
+                    Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
+                    
+                    # Predict
+                    arr = np.array([
+                        [
+                            Elevation,
+                            Road_Density,
+                            Rain_mm,
+                            Rain_Past3h,
+                            Drain_Water_Level,
+                            Soil_Moisture,
+                            int(hour),
+                            int(month),
+                            int(dow),
+                        ]
+                    ])
+                    
+                    results = transform_and_predict(arr)
+                    if results:
+                        # Convert class prediction to normalized score
+                        # class 0=High (0.8), 1=Low (0.2), 2=Medium (0.5)
+                        class_id = results[0]["class"]
+                        score = WardAggregator.class_to_score(class_id)  # type: ignore
+                        grid_predictions[grid_id] = score
                 
-                # Derive features from location for missing values
-                feats_loc = derive_features_from_location(request.latitude, request.longitude)
-                
-                Elevation = val_or_default("Elevation", feats_loc["Elevation"])
-                Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
-                Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
-                Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
-                Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
-                Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
-                
-                # Predict
-                arr = np.array([[
-                    Elevation, Road_Density, Rain_mm, Rain_Past3h, Drain_Water_Level, Soil_Moisture,
-                    int(hour), int(month), int(dow)
-                ]])
-                
-                results = transform_and_predict(arr)
-                if results:
-                    # Convert class prediction to normalized score
-                    # class 0=High (0.8), 1=Low (0.2), 2=Medium (0.5)
-                    class_id = results[0]["class"]
-                    score = WardAggregator.class_to_score(class_id)  # type: ignore
-                    grid_predictions[grid_id] = score
-            
-            except Exception as e:
-                print(f"[PREDICT WARD] Error predicting grid {grid_id}: {e}")
-                continue
+                except Exception as e:
+                    print(f"[PREDICT WARD] Error predicting grid {grid_id}: {e}")
+                    continue
         
         # Aggregate predictions
         if not grid_predictions:
@@ -786,6 +820,9 @@ def predict_ward(request: WardPredictionRequest):
             "day_of_week": int(dow)
         }
         summary["aggregation_method"] = aggregation_method
+        summary["ward_lookup"] = lookup_method
+        if not grid_ids:
+            summary["fallback"] = "single_point"
         
         return summary
     
