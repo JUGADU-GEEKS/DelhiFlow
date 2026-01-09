@@ -335,7 +335,28 @@ function PredictTest() {
                   wardName={prediction?.Ward_Name}
                   floodRiskClass={prediction?.Flood_Risk_Class}
                   API_BASE={API_BASE}
+                  showHeatmap={true}
                 />
+              </div>
+              
+              <div className="mt-3 bg-black/30 rounded-xl p-3 border border-purple-400/20">
+                <p className="text-white/70 text-xs mb-2">
+                  <strong className="text-white">Flood Risk Heatmap:</strong> Risk intensity overlay across all Delhi wards
+                </p>
+                <div className="flex items-center gap-4 text-xs">
+                  <div className="flex items-center gap-1">
+                    <div className="w-4 h-4 rounded bg-blue-500"></div>
+                    <span className="text-white/60">Low</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <div className="w-4 h-4 rounded bg-yellow-500"></div>
+                    <span className="text-white/60">Medium</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <div className="w-4 h-4 rounded bg-red-500"></div>
+                    <span className="text-white/60">High</span>
+                  </div>
+                </div>
               </div>
               
               {prediction?.Ward_ID && (

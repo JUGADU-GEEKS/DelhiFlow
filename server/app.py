@@ -1005,6 +1005,218 @@ def get_wards_geojson():
         raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
 
 
+@app.get("/heatmap/ward_risk")
+def get_ward_risk_heatmap(
+    timestamp: Optional[str] = None,
+    hour_of_day: Optional[int] = None,
+    month: Optional[int] = None,
+    day_of_week: Optional[int] = None,
+    aggregation_method: str = "mean"
+):
+    """Generate flood risk heatmap data for all wards.
+    
+    Processes all wards from GeoJSON, computes centroids, runs predictions,
+    and returns heatmap data points in [latitude, longitude, risk_intensity] format.
+    
+    Query Parameters:
+        timestamp: ISO8601 timestamp (optional)
+        hour_of_day: Hour (0-23, optional)
+        month: Month (1-12, optional)
+        day_of_week: Day of week (0-6, optional)
+        aggregation_method: Aggregation method for ward-level predictions (default: "mean")
+    
+    Returns:
+        {
+            "heatmap_data": [[lat, lng, intensity], ...],
+            "total_wards": int,
+            "processed_wards": int,
+            "time_used": {...},
+            "metadata": {...}
+        }
+    """
+    try:
+        if not is_ward_available():
+            raise HTTPException(
+                status_code=404,
+                detail="Ward boundaries not available"
+            )
+        
+        # Parse time info
+        now = datetime.datetime.now()
+        if timestamp:
+            try:
+                dt = dtparser.parse(timestamp)
+                hour = dt.hour
+                month_val = dt.month
+                dow = dt.weekday()
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid timestamp format")
+        else:
+            hour = hour_of_day if hour_of_day is not None else now.hour
+            month_val = month if month is not None else now.month
+            dow = day_of_week if day_of_week is not None else now.weekday()
+        
+        # Get all wards
+        ward_gdf = get_ward_gdf()  # type: ignore
+        df = load_dataset()
+        if df is None:
+            raise HTTPException(status_code=500, detail="Dataset not available on server")
+        
+        heatmap_data = []
+        processed_count = 0
+        error_count = 0
+        
+        # Process each ward
+        for idx, row in ward_gdf.iterrows():
+            try:
+                ward_id = int(row.get('Ward_ID') or row.get('Ward_No', 0))
+                if ward_id == 0:
+                    continue
+                
+                # Compute centroid of the ward polygon
+                geometry = row.geometry
+                centroid = geometry.centroid
+                lat = float(centroid.y)
+                lon = float(centroid.x)
+                
+                # Get all grids in this ward
+                grid_ids = get_grids_in_ward(ward_id)  # type: ignore
+                grid_predictions = {}
+                
+                if not grid_ids:
+                    # Fallback: predict directly at centroid
+                    feats_loc = derive_features_from_location(lat, lon)
+                    arr = np.array([[
+                        feats_loc["Elevation"],
+                        feats_loc["Road_Density"],
+                        feats_loc["Rain_mm"],
+                        feats_loc["Rain_Past3h"],
+                        feats_loc["Drain_Water_Level"],
+                        feats_loc["Soil_Moisture"],
+                        int(hour),
+                        int(month_val),
+                        int(dow),
+                    ]])
+                    results = transform_and_predict(arr)
+                    if results:
+                        class_id = results[0]["class"]
+                        score = WardAggregator.class_to_score(class_id)  # type: ignore
+                        grid_predictions[-1] = score
+                else:
+                    # Predict for all grids in ward
+                    for grid_id in grid_ids:
+                        try:
+                            df_grid = df[df["Grid_ID"] == int(grid_id)]
+                            if df_grid.empty:
+                                continue
+                            
+                            # Ensure Hour is datetime
+                            if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
+                                try:
+                                    df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
+                                except Exception:
+                                    pass
+                            
+                            # Filter by month and hour
+                            df_sel = df_grid[(df_grid["Hour"].dt.month == int(month_val)) & (df_grid["Hour"].dt.hour == int(hour))]
+                            if df_sel.empty:
+                                df_sel = df_grid.head(1)
+                            
+                            grid_row = df_sel.iloc[0]
+                            
+                            def val_or_default(name, default):
+                                v = grid_row.get(name)
+                                try:
+                                    if v is None or (isinstance(v, float) and np.isnan(v)):
+                                        return default
+                                    return float(v)
+                                except Exception:
+                                    return default
+                            
+                            feats_loc = derive_features_from_location(lat, lon)
+                            
+                            Elevation = val_or_default("Elevation", feats_loc["Elevation"])
+                            Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
+                            Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
+                            Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
+                            Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
+                            Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
+                            
+                            arr = np.array([[
+                                Elevation,
+                                Road_Density,
+                                Rain_mm,
+                                Rain_Past3h,
+                                Drain_Water_Level,
+                                Soil_Moisture,
+                                int(hour),
+                                int(month_val),
+                                int(dow),
+                            ]])
+                            
+                            results = transform_and_predict(arr)
+                            if results:
+                                class_id = results[0]["class"]
+                                score = WardAggregator.class_to_score(class_id)  # type: ignore
+                                grid_predictions[grid_id] = score
+                        
+                        except Exception as e:
+                            print(f"[HEATMAP] Error predicting grid {grid_id} in ward {ward_id}: {e}")
+                            continue
+                
+                # Aggregate to ward-level risk score
+                if grid_predictions:
+                    aggregator = WardAggregator()
+                    risk_score = aggregator.aggregate_predictions(
+                        grid_predictions,
+                        method=aggregation_method
+                    )
+                    # Add to heatmap data: [latitude, longitude, intensity]
+                    # Intensity is normalized 0-1, where 1 = highest risk
+                    heatmap_data.append([lat, lon, float(risk_score)])
+                    processed_count += 1
+                else:
+                    error_count += 1
+                    
+            except Exception as e:
+                print(f"[HEATMAP] Error processing ward {idx}: {e}")
+                error_count += 1
+                continue
+        
+        if not heatmap_data:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not generate heatmap data for any ward"
+            )
+        
+        return {
+            "heatmap_data": heatmap_data,
+            "total_wards": len(ward_gdf),
+            "processed_wards": processed_count,
+            "error_count": error_count,
+            "time_used": {
+                "hour_of_day": int(hour),
+                "month": int(month_val),
+                "day_of_week": int(dow)
+            },
+            "aggregation_method": aggregation_method,
+            "metadata": {
+                "intensity_range": {
+                    "min": float(min(point[2] for point in heatmap_data)),
+                    "max": float(max(point[2] for point in heatmap_data)),
+                    "mean": float(np.mean([point[2] for point in heatmap_data]))
+                }
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        print(f"[HEATMAP] Error: {tb}")
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
 @app.get("/wards/{ward_id}/geojson")
 def get_ward_geojson(ward_id: int):
     """Get a specific ward's geometry as GeoJSON.
