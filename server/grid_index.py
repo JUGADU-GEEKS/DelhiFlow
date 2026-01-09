@@ -26,7 +26,7 @@ DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 
 def _candidate_paths(prefix: str):
     """Get candidate file paths for a given data type (grid or ward)."""
-    return [
+    paths = [
         os.path.join(DATASET_DIR, f"{prefix}_index.geojson"),
         os.path.join(DATASET_DIR, f"{prefix}_index.parquet"),
         os.path.join(DATASET_DIR, f"{prefix}_index.shp"),
@@ -34,6 +34,13 @@ def _candidate_paths(prefix: str):
         os.path.join(DATASET_DIR, f"{prefix}_boundaries.parquet"),
         os.path.join(DATASET_DIR, f"{prefix}_boundaries.shp"),
     ]
+    # For wards, also check original delhi_wards.geojson (if it exists in parent directory)
+    if prefix == "ward":
+        original_path = os.path.join(BASE_DIR, "delhi_wards.geojson")
+        if os.path.exists(original_path):
+            # Prepend to check first (original has better ward names)
+            paths.insert(0, original_path)
+    return paths
 
 
 def _load_gdf(data_type: str = "grid", id_column: str = "Grid_ID"):
@@ -98,7 +105,11 @@ def get_grid_gdf():
 
 @lru_cache(maxsize=2)
 def get_ward_gdf():
-    """Load and cache ward geometry."""
+    """Load and cache ward geometry.
+    
+    This function caches the GeoDataFrame. To reload with different files,
+    call get_ward_gdf.cache_clear() first.
+    """
     return _load_gdf("ward", "Ward_ID")
 
 
@@ -215,40 +226,83 @@ def get_grids_in_ward(ward_id: int) -> List[int]:
 def _extract_ward_name(row, ward_gdf) -> Optional[str]:
     """Extract ward name from GeoJSON properties dynamically.
     
-    Checks for common ward name property variations in order of preference:
-    1. WardName (as found in delhi_wards.geojson)
-    2. Ward_Name (as found in enhanced ward_boundaries.geojson)
-    3. ward_name, WARD_NAME, name (other common variations)
-    4. NW2022 (formatted name field from delhi_wards.geojson)
+    Checks for actual ward name properties, avoiding district-prefixed names
+    from enhance_ward_names.py. Prioritizes genuine ward names like "FATEH NAGAR"
+    over district-prefixed names like "South Delhi - Ward 1".
+    
+    Priority order:
+    1. WardName (actual ward name from delhi_wards.geojson, e.g., "FATEH NAGAR")
+    2. NW2022 (formatted name, extract ward name part after comma)
+    3. Ward_Name (but strip district prefix if present, e.g., "South Delhi - Ward 1" -> "Ward 1")
+    4. Other variations (ward_name, WARD_NAME, name)
     
     Args:
         row: The GeoDataFrame row for the ward
         ward_gdf: The full ward GeoDataFrame (for column checking)
         
     Returns:
-        Ward name string if found, None otherwise
+        Ward name string if found (without district prefixes), None otherwise
     """
-    # Priority order for ward name properties
-    name_candidates = [
-        'WardName',      # From delhi_wards.geojson (original)
-        'Ward_Name',     # From enhanced ward_boundaries.geojson
-        'ward_name',     # Lowercase variant
-        'WARD_NAME',     # Uppercase variant
-        'name',          # Generic name field
-        'NW2022',        # Formatted name from delhi_wards.geojson (e.g., "100, FATEH NAGAR")
-    ]
+    # Priority 1: WardName - actual ward name from original GeoJSON
+    if 'WardName' in ward_gdf.columns:
+        value = row.get('WardName')
+        if value is not None and str(value).strip():
+            name = str(value).strip()
+            # Avoid district names - if it contains "Delhi" and pattern like "X Delhi", skip it
+            if 'Delhi' not in name or '-' not in name:
+                return name
     
-    for candidate in name_candidates:
+    # Priority 2: NW2022 - formatted name (e.g., "100, FATEH NAGAR")
+    if 'NW2022' in ward_gdf.columns:
+        value = row.get('NW2022')
+        if value is not None and str(value).strip():
+            if ',' in str(value):
+                # Extract name part after comma (e.g., "100, FATEH NAGAR" -> "FATEH NAGAR")
+                parts = str(value).split(',', 1)
+                if len(parts) > 1:
+                    name = parts[1].strip()
+                    # Only return if it doesn't look like a district name
+                    if 'Delhi' not in name or '-' not in name:
+                        return name
+    
+    # Priority 3: Ward_Name - but strip district prefix if present
+    if 'Ward_Name' in ward_gdf.columns:
+        value = row.get('Ward_Name')
+        if value is not None and str(value).strip():
+            name = str(value).strip()
+            # Check if it's a district-prefixed name (e.g., "South Delhi - Ward 1")
+            if ' - ' in name or ' -' in name or '- ' in name:
+                parts = name.split('-', 1)
+                if len(parts) > 1:
+                    # Extract the part after the dash (e.g., "Ward 1")
+                    ward_part = parts[1].strip()
+                    # If it starts with "Ward", use it; otherwise check if original is better
+                    if ward_part.startswith('Ward'):
+                        return ward_part
+                    # If we have a ward number, use "Ward {number}" format
+                    ward_id = row.get('Ward_ID') or row.get('Ward_No')
+                    if ward_id is not None:
+                        return f"Ward {ward_id}"
+            else:
+                # Not a district-prefixed name, use as-is
+                # But avoid if it's just a district name
+                if 'Delhi' not in name or ('Ward' in name or any(char.isdigit() for char in name)):
+                    return name
+    
+    # Priority 4: Other variations
+    for candidate in ['ward_name', 'WARD_NAME', 'name']:
         if candidate in ward_gdf.columns:
             value = row.get(candidate)
             if value is not None and str(value).strip():
-                # Clean up NW2022 format if needed (e.g., "100, FATEH NAGAR" -> "FATEH NAGAR")
-                if candidate == 'NW2022' and ',' in str(value):
-                    # Extract name part after comma
-                    parts = str(value).split(',', 1)
-                    if len(parts) > 1:
-                        return parts[1].strip()
-                return str(value).strip()
+                name = str(value).strip()
+                # Avoid district-only names
+                if 'Delhi' not in name or ('Ward' in name or '-' in name):
+                    return name
+    
+    # Fallback: Use ward number if available
+    ward_id = row.get('Ward_ID') or row.get('Ward_No')
+    if ward_id is not None:
+        return f"Ward {ward_id}"
     
     return None
 

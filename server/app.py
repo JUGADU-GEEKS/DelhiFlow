@@ -964,7 +964,8 @@ def get_wards_geojson():
         geojson_str = ward_gdf.to_json()
         geojson_dict = json.loads(geojson_str)
         
-        # Ensure properties include Ward_ID and Ward_Name
+        # Ensure properties include Ward_ID and Ward_Name (with correct ward names, not district names)
+        # Always use dynamic extraction to get correct ward names from GeoJSON properties
         for feature in geojson_dict.get("features", []):
             props = feature.get("properties", {})
             # Ensure Ward_ID exists
@@ -975,17 +976,24 @@ def get_wards_geojson():
                         props["Ward_ID"] = props[alt_id]
                         break
             
-            # Ensure Ward_Name exists (using dynamic extraction)
-            if "Ward_Name" not in props or not props.get("Ward_Name"):
-                # Use the dynamic extraction logic
-                ward_id = props.get("Ward_ID")
-                if ward_id:
-                    try:
-                        ward_info = get_ward_info(int(ward_id))  # type: ignore
-                        if ward_info and ward_info.get("Ward_Name"):
-                            props["Ward_Name"] = ward_info["Ward_Name"]
-                    except Exception:
-                        pass
+            # Always use dynamic extraction to get correct ward name (avoid district-prefixed names)
+            ward_id = props.get("Ward_ID")
+            if ward_id:
+                try:
+                    ward_info = get_ward_info(int(ward_id))  # type: ignore
+                    if ward_info and ward_info.get("Ward_Name"):
+                        # Use the dynamically extracted name (which avoids district prefixes)
+                        props["Ward_Name"] = ward_info["Ward_Name"]
+                    elif "Ward_Name" not in props or not props.get("Ward_Name"):
+                        # Fallback: ensure we have at least "Ward {ID}" format
+                        props["Ward_Name"] = f"Ward {ward_id}"
+                except Exception as e:
+                    # Fallback if extraction fails
+                    if "Ward_Name" not in props or not props.get("Ward_Name"):
+                        props["Ward_Name"] = f"Ward {ward_id}" if ward_id else "Unknown Ward"
+            elif "Ward_Name" not in props or not props.get("Ward_Name"):
+                # No ward ID available, use unknown
+                props["Ward_Name"] = "Unknown Ward"
         
         return geojson_dict
     
@@ -1036,13 +1044,17 @@ def get_ward_geojson(ward_id: int):
         geojson_str = ward_rows.to_json()
         geojson_dict = json.loads(geojson_str)
         
-        # Ensure properties are set correctly
+        # Ensure properties are set correctly (with correct ward names, not district names)
         for feature in geojson_dict.get("features", []):
             props = feature.get("properties", {})
-            # Get ward info to ensure Ward_Name is set
+            # Always use dynamic extraction to get correct ward name (avoid district-prefixed names)
             ward_info = get_ward_info(ward_id)  # type: ignore
             if ward_info and ward_info.get("Ward_Name"):
+                # Use the dynamically extracted name (which avoids district prefixes)
                 props["Ward_Name"] = ward_info["Ward_Name"]
+            elif "Ward_Name" not in props or not props.get("Ward_Name"):
+                # Fallback: ensure we have at least "Ward {ID}" format
+                props["Ward_Name"] = f"Ward {ward_id}"
         
         return geojson_dict
     
