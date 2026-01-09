@@ -56,11 +56,22 @@ def _load_gdf(data_type: str = "grid", id_column: str = "Grid_ID"):
             gdf = gpd.read_file(p)
             # Normalize expected ID column
             if id_column not in gdf.columns:
-                # try some common variants
-                for alt in (id_column.lower(), id_column.replace("_", ""), f"id"):
-                    if alt in gdf.columns:
-                        gdf = gdf.rename(columns={alt: id_column})
-                        break
+                # For wards, try Ward_No (from delhi_wards.geojson) as well
+                if data_type == "ward" and id_column == "Ward_ID":
+                    # Check for Ward_No first (original GeoJSON format)
+                    if "Ward_No" in gdf.columns:
+                        gdf = gdf.rename(columns={"Ward_No": id_column})
+                    elif "ward_no" in gdf.columns:
+                        gdf = gdf.rename(columns={"ward_no": id_column})
+                    elif "WNo_SEC" in gdf.columns:
+                        # Sometimes Ward_No might be in WNo_SEC
+                        gdf = gdf.rename(columns={"WNo_SEC": id_column})
+                # try common variants
+                if id_column not in gdf.columns:
+                    for alt in (id_column.lower(), id_column.replace("_", ""), f"id"):
+                        if alt in gdf.columns:
+                            gdf = gdf.rename(columns={alt: id_column})
+                            break
             if id_column not in gdf.columns or gdf.geometry is None:
                 raise RuntimeError(
                     f"Index file '{p}' missing required columns [{id_column}, geometry]"
@@ -201,8 +212,52 @@ def get_grids_in_ward(ward_id: int) -> List[int]:
         return []
 
 
+def _extract_ward_name(row, ward_gdf) -> Optional[str]:
+    """Extract ward name from GeoJSON properties dynamically.
+    
+    Checks for common ward name property variations in order of preference:
+    1. WardName (as found in delhi_wards.geojson)
+    2. Ward_Name (as found in enhanced ward_boundaries.geojson)
+    3. ward_name, WARD_NAME, name (other common variations)
+    4. NW2022 (formatted name field from delhi_wards.geojson)
+    
+    Args:
+        row: The GeoDataFrame row for the ward
+        ward_gdf: The full ward GeoDataFrame (for column checking)
+        
+    Returns:
+        Ward name string if found, None otherwise
+    """
+    # Priority order for ward name properties
+    name_candidates = [
+        'WardName',      # From delhi_wards.geojson (original)
+        'Ward_Name',     # From enhanced ward_boundaries.geojson
+        'ward_name',     # Lowercase variant
+        'WARD_NAME',     # Uppercase variant
+        'name',          # Generic name field
+        'NW2022',        # Formatted name from delhi_wards.geojson (e.g., "100, FATEH NAGAR")
+    ]
+    
+    for candidate in name_candidates:
+        if candidate in ward_gdf.columns:
+            value = row.get(candidate)
+            if value is not None and str(value).strip():
+                # Clean up NW2022 format if needed (e.g., "100, FATEH NAGAR" -> "FATEH NAGAR")
+                if candidate == 'NW2022' and ',' in str(value):
+                    # Extract name part after comma
+                    parts = str(value).split(',', 1)
+                    if len(parts) > 1:
+                        return parts[1].strip()
+                return str(value).strip()
+    
+    return None
+
+
 def get_ward_info(ward_id: int) -> Optional[dict]:
     """Get ward information including geometry bounds and name if available.
+    
+    Ward names are extracted dynamically from GeoJSON properties, supporting
+    various property name formats (WardName, Ward_Name, ward_name, etc.).
     
     Args:
         ward_id: The Ward_ID to query
@@ -231,9 +286,10 @@ def get_ward_info(ward_id: int) -> Optional[dict]:
             }
         }
         
-        # Add ward name if available
-        if 'Ward_Name' in ward_gdf.columns:
-            info['Ward_Name'] = row['Ward_Name']
+        # Extract ward name dynamically from GeoJSON properties
+        ward_name = _extract_ward_name(row, ward_gdf)
+        if ward_name:
+            info['Ward_Name'] = ward_name
         
         return info
     except Exception as e:

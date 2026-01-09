@@ -14,12 +14,12 @@ import cv2
 
 try:
     from .grid_index import (lookup_grid_id, is_available as grid_index_available,  # type: ignore
-                             lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info)  # type: ignore
+                             lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info, get_ward_gdf)  # type: ignore
 except Exception:
     # Fallback when running as script
     try:
         from grid_index import (lookup_grid_id, is_available as grid_index_available,  # type: ignore
-                               lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info)  # type: ignore
+                               lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info, get_ward_gdf)  # type: ignore
     except Exception:
         lookup_grid_id = None  # type: ignore
         grid_index_available = lambda: False  # type: ignore
@@ -27,6 +27,7 @@ except Exception:
         is_ward_available = lambda: False  # type: ignore
         get_grids_in_ward = None  # type: ignore
         get_ward_info = None  # type: ignore
+        get_ward_gdf = None  # type: ignore
 
 try:
     from .ward_aggregation import WardAggregator, create_ward_prediction_summary  # type: ignore
@@ -922,11 +923,131 @@ def predict_ward_batch(requests_list: List[WardPredictionRequest]):
         
         return {
             "results": results,
-            "processed": len(results_list) - failed,
+            "processed": len(requests_list) - failed,
             "failed": failed,
             "total": len(requests_list)
         }
     
+    except Exception as ex:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.get("/wards/geojson")
+def get_wards_geojson():
+    """Get all ward boundaries as GeoJSON for map visualization.
+    
+    Returns:
+        GeoJSON FeatureCollection with all wards including their properties.
+    """
+    try:
+        if not is_ward_available():
+            raise HTTPException(
+                status_code=404,
+                detail="Ward boundaries not available"
+            )
+        
+        # Import geopandas here to avoid dependency if not needed
+        try:
+            import geopandas as gpd
+            import json
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="geopandas is required for GeoJSON export"
+            )
+        
+        # Get ward GeoDataFrame
+        ward_gdf = get_ward_gdf()  # type: ignore
+        
+        # Convert to GeoJSON
+        geojson_str = ward_gdf.to_json()
+        geojson_dict = json.loads(geojson_str)
+        
+        # Ensure properties include Ward_ID and Ward_Name
+        for feature in geojson_dict.get("features", []):
+            props = feature.get("properties", {})
+            # Ensure Ward_ID exists
+            if "Ward_ID" not in props:
+                # Try to find it in alternative field names
+                for alt_id in ["Ward_No", "ward_no", "WNo_SEC"]:
+                    if alt_id in props:
+                        props["Ward_ID"] = props[alt_id]
+                        break
+            
+            # Ensure Ward_Name exists (using dynamic extraction)
+            if "Ward_Name" not in props or not props.get("Ward_Name"):
+                # Use the dynamic extraction logic
+                ward_id = props.get("Ward_ID")
+                if ward_id:
+                    try:
+                        ward_info = get_ward_info(int(ward_id))  # type: ignore
+                        if ward_info and ward_info.get("Ward_Name"):
+                            props["Ward_Name"] = ward_info["Ward_Name"]
+                    except Exception:
+                        pass
+        
+        return geojson_dict
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        print(f"[ERROR] Failed to get wards GeoJSON: {tb}")
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.get("/wards/{ward_id}/geojson")
+def get_ward_geojson(ward_id: int):
+    """Get a specific ward's geometry as GeoJSON.
+    
+    Args:
+        ward_id: The Ward_ID to retrieve
+        
+    Returns:
+        GeoJSON Feature for the specific ward.
+    """
+    try:
+        if not is_ward_available():
+            raise HTTPException(
+                status_code=404,
+                detail="Ward boundaries not available"
+            )
+        
+        try:
+            import geopandas as gpd
+            import json
+        except ImportError:
+            raise HTTPException(
+                status_code=500,
+                detail="geopandas is required for GeoJSON export"
+            )
+        
+        ward_gdf = get_ward_gdf()  # type: ignore
+        ward_rows = ward_gdf[ward_gdf['Ward_ID'] == ward_id]
+        
+        if ward_rows.empty:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Ward {ward_id} not found"
+            )
+        
+        # Convert single ward to GeoJSON
+        geojson_str = ward_rows.to_json()
+        geojson_dict = json.loads(geojson_str)
+        
+        # Ensure properties are set correctly
+        for feature in geojson_dict.get("features", []):
+            props = feature.get("properties", {})
+            # Get ward info to ensure Ward_Name is set
+            ward_info = get_ward_info(ward_id)  # type: ignore
+            if ward_info and ward_info.get("Ward_Name"):
+                props["Ward_Name"] = ward_info["Ward_Name"]
+        
+        return geojson_dict
+    
+    except HTTPException:
+        raise
     except Exception as ex:
         tb = traceback.format_exc()
         raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})

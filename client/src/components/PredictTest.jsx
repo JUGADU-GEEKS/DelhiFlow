@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Squares from './Squares';
 import Dock from './Dock';
 import ShinyText from './ShinyText';
+import WardMap from './WardMap';
 import { VscHome, VscLocation, VscRefresh, VscGithubInverted } from 'react-icons/vsc';
 import { useNavigate } from 'react-router-dom';
 
@@ -205,9 +206,9 @@ function PredictTest() {
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           
-          {/* Left: Location */}
-          <div>
-            <div className="bg-purple-900/20 backdrop-blur-xl border border-purple-400/30 rounded-3xl p-8 shadow-2xl shadow-purple-900/20 mb-6">
+          {/* Left: Location and Map */}
+          <div className="space-y-6">
+            <div className="bg-purple-900/20 backdrop-blur-xl border border-purple-400/30 rounded-3xl p-8 shadow-2xl shadow-purple-900/20">
               {/* Start location block (unchanged aside from minor tweaks) */}
               <h2 className="text-white text-2xl font-bold mb-6 flex items-center gap-3">
                 <div className="bg-gradient-to-br from-purple-400 to-fuchsia-500 w-10 h-10 rounded-xl flex items-center justify-center shadow-lg shadow-purple-500/30">
@@ -315,6 +316,48 @@ function PredictTest() {
               )}
             </div>
 
+            {/* Map Section */}
+            <div className="bg-purple-900/20 backdrop-blur-xl border border-purple-400/30 rounded-3xl p-8 shadow-2xl shadow-purple-900/20">
+              <h2 className="text-white text-2xl font-bold mb-6 flex items-center gap-3">
+                <div className="bg-gradient-to-br from-purple-400 to-fuchsia-500 w-10 h-10 rounded-xl flex items-center justify-center shadow-lg shadow-purple-500/30">
+                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+                  </svg>
+                </div>
+                Ward Map
+              </h2>
+              
+              <div className="w-full" style={{ height: '500px' }}>
+                <WardMap
+                  latitude={location?.latitude}
+                  longitude={location?.longitude}
+                  detectedWardId={prediction?.Ward_ID}
+                  wardName={prediction?.Ward_Name}
+                  floodRiskClass={prediction?.Flood_Risk_Class}
+                  API_BASE={API_BASE}
+                />
+              </div>
+              
+              {prediction?.Ward_ID && (
+                <div className="mt-4 bg-black/30 rounded-2xl p-4 border border-purple-400/20">
+                  <p className="text-white/70 text-sm mb-2">
+                    <strong className="text-white">Detected Ward:</strong> {prediction.Ward_Name || `Ward ${prediction.Ward_ID}`}
+                  </p>
+                  {prediction.Flood_Risk_Class && (
+                    <p className="text-white/70 text-sm">
+                      <strong className="text-white">Flood Risk:</strong> 
+                      <span className={`ml-2 font-semibold ${
+                        prediction.Flood_Risk_Class.toLowerCase() === 'high' ? 'text-red-400' :
+                        prediction.Flood_Risk_Class.toLowerCase() === 'medium' ? 'text-yellow-400' :
+                        'text-green-400'
+                      }`}>
+                        {prediction.Flood_Risk_Class}
+                      </span>
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Right: Prediction Results */}
