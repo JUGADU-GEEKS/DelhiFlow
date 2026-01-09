@@ -367,7 +367,7 @@ function Predict() {
                   </div>
 
                   {/* Confidence Score */}
-                  <div className="bg-black/30 rounded-2xl p-6 border border-purple-400/20">
+                  {/* <div className="bg-black/30 rounded-2xl p-6 border border-purple-400/20">
                     <div className="flex justify-between items-center mb-3">
                       <span className="text-white/70 text-sm font-medium">Confidence</span>
                       <span className="text-white font-bold text-lg">{prediction.confidence}%</span>
@@ -378,7 +378,7 @@ function Predict() {
                         style={{ width: `${prediction.confidence}%` }}
                       ></div>
                     </div>
-                  </div>
+                  </div> */}
 
                   {/* Risk Description */}
                   <div className="bg-black/30 rounded-2xl p-6 border border-purple-400/20">

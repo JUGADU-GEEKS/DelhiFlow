@@ -7,6 +7,8 @@ import { VscHome, VscArchive, VscAccount, VscGithubInverted } from 'react-icons/
 import kunalImage from '../../public/kunal.jpg';
 import sangyaImage from '../../public/sangya.jpg';
 import dhruvImage from '../../public/dhruv.jpg';
+import devangImage from '../../public/devang.jpg';
+import sakshiImage from '../../public/sakshi.jpg';
 import { Link } from 'react-router-dom';
 
 function Landing() {
@@ -58,6 +60,24 @@ function Landing() {
       borderColor: "#d856bf",
       gradient: "linear-gradient(210deg, #d856bf, #000)",
       url: "https://dhruvs-portfolio-khaki.vercel.app/"
+    },
+    {
+      image: devangImage,
+      title: "Devang Singh",
+      subtitle: "Full Stack Developer",
+      handle: "@devang9890",
+      borderColor: "#d856bf",
+      gradient: "linear-gradient(210deg, #d856bf, #000)",
+      url: "https://github.com/devang9890"
+    },
+    {
+      image: sakshiImage,
+      title: "Sakshi Singh",
+      subtitle: "Full Stack Developer",
+      handle: "@sakshisingh85",
+      borderColor: "#d856bf",
+      gradient: "linear-gradient(210deg, #d856bf, #000)",
+      url: "https://github.com/sakshisingh85"
     }
   ];
 
