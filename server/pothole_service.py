@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 from pymongo import MongoClient
 import certifi
-from core.config import MONGO_URL, MODEL_PATH
+from core.config import MONGO_URL, MODEL_PATH, RELAX_EXIF_VALIDATION
 from datetime import datetime, timedelta
 import os
 from bson import ObjectId
@@ -53,24 +53,34 @@ def report_from_citizen(file_bytes: bytes, browser_lat: float, browser_lon: floa
 
     Returns dict with success/detected/gridId/potholeCount or raises HTTPException.
     """
-    # Step 1: Extract EXIF
+    # Step 1: Extract EXIF (optional in relaxed mode)
     exif = extract_exif_gps_and_time(file_bytes)
-    if not exif:
-        raise HTTPException(status_code=400, detail="Please capture a LIVE photo using camera (no gallery images).")
-
-    exif_lat, exif_lon, exif_time = exif
     now = datetime.utcnow()
 
-    # Step 2: Validate location (anti-fake)
-    distance_m = haversine_meters(browser_lat, browser_lon, exif_lat, exif_lon)
-    if distance_m > 40:
-        raise HTTPException(status_code=400, detail="Location mismatch. Please take the picture at the pothole location.")
+    if not RELAX_EXIF_VALIDATION:
+        if not exif:
+            raise HTTPException(status_code=400, detail="Please capture a LIVE photo using camera (no gallery images).")
 
-    # Validate timestamp
-    if exif_time is None:
-        raise HTTPException(status_code=400, detail="Please capture a LIVE photo using camera (no gallery images).")
-    if now - exif_time > timedelta(minutes=2):
-        raise HTTPException(status_code=400, detail="Photo too old. Please capture a fresh photo.")
+        exif_lat, exif_lon, exif_time = exif
+
+        # Step 2: Validate location (anti-fake)
+        distance_m = haversine_meters(browser_lat, browser_lon, exif_lat, exif_lon)
+        if distance_m > 40:
+            raise HTTPException(status_code=400, detail="Location mismatch. Please take the picture at the pothole location.")
+
+        # Validate timestamp
+        if exif_time is None:
+            raise HTTPException(status_code=400, detail="Please capture a LIVE photo using camera (no gallery images).")
+        if now - exif_time > timedelta(minutes=2):
+            raise HTTPException(status_code=400, detail="Photo too old. Please capture a fresh photo.")
+    else:
+        # Relaxed mode: proceed even without EXIF; use browser coords/time as fallback
+        if exif:
+            exif_lat, exif_lon, exif_time = exif
+            logger.info("[POTHOLE] Relaxed mode: EXIF present; skipping strict checks")
+        else:
+            exif_lat, exif_lon, exif_time = browser_lat, browser_lon, now
+            logger.info("[POTHOLE] Relaxed mode: no EXIF found; using browser location/time")
 
     # Step 3: Run YOLO pothole detection (only once)
     model = _get_pothole_model()
@@ -122,7 +132,7 @@ def report_from_citizen(file_bytes: bytes, browser_lat: float, browser_lon: floa
         {"gridId": gridId},
         {
             "$inc": {"potholeCount": 1},
-            "$set": {"latestReportTime": now, "status": "pending"},
+            "$set": {"latestReportTime": now, "status": "resolved"},
             "$setOnInsert": {"gridId": gridId, "lat": base_lat, "lon": base_lon}
         },
         upsert=True
@@ -146,7 +156,7 @@ def report_from_iot(lat: float, lon: float, intensity: float = None, vehicleId: 
         {"gridId": gridId},
         {
             "$inc": {"potholeCount": 1},
-            "$set": {"latestReportTime": now, "status": "pending"},
+            "$set": {"latestReportTime": now, "status": "resolved"},
             "$setOnInsert": {"gridId": gridId, "lat": base_lat, "lon": base_lon}
         },
         upsert=True,

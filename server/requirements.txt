@@ -17,3 +17,6 @@ python-dateutil
 pillow
 ultralytics
 opencv-python
+pymongo
+certifi
+python-multipart

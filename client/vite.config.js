@@ -12,11 +12,23 @@ export default defineConfig({
     },
   },  server: {
     proxy: {
+      '/analyze_issue': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
       '/safe-route': {
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      '/potholes': {
+      '/potholes/report': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/potholes/iot': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/potholes/map': {
         target: 'http://localhost:8000',
         changeOrigin: true,
       },

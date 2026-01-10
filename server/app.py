@@ -65,16 +65,14 @@ app.add_middleware(
 
 # Mount potholes router
 try:
-    from .potholes import router as potholes_router  # when running as package
-except Exception:
-    try:
-        from potholes import router as potholes_router  # when running as module
-    except Exception:
-        potholes_router = None
+    from potholes_router import router as potholes_router
+except Exception as e:
+    print(f"[ROUTER] Failed to import potholes_router: {e}")
+    potholes_router = None
 
 if potholes_router:
-    app.include_router(potholes_router, prefix="/potholes", tags=["potholes"])
-    print("[ROUTER] Mounted potholes router at /potholes")
+    app.include_router(potholes_router, tags=["potholes"])
+    print("[ROUTER] Mounted potholes router")
 else:
     print("[ROUTER] Potholes router NOT mounted")
 # ---------------------------------------------------
@@ -151,6 +149,89 @@ MODEL, SCALER, LE = load_artifacts()
 @app.get("/health")
 def health():
 	return {"status": "ok", "model_loaded": MODEL is not None}
+
+
+@app.post("/analyze_issue")
+async def analyze_issue(file: UploadFile = File(...), lat: float = Form(None), lon: float = Form(None)):
+	"""Analyze uploaded image for pothole detection using YOLO model.
+	
+	This endpoint performs pothole detection and returns bounding boxes.
+	It does NOT save to database - that's handled by /potholes/report endpoint.
+	"""
+	try:
+		# Read image bytes
+		contents = await file.read()
+		
+		# Decode image
+		np_arr = np.frombuffer(contents, np.uint8)
+		img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+		
+		if img is None:
+			raise HTTPException(status_code=400, detail="Could not decode image")
+		
+		# Load YOLO model (use pothole model if available)
+		model_path = os.path.join(BASE_DIR, 'model', 'potholes.pt')
+		if not os.path.exists(model_path):
+			model_path = os.path.join(BASE_DIR, 'yolov8n.pt')
+		
+		try:
+			yolo_model = YOLO(model_path)
+		except Exception as e:
+			raise HTTPException(status_code=500, detail=f"Failed to load YOLO model: {str(e)}")
+		
+		# Run inference
+		results = yolo_model(img)
+		
+		# Parse detections
+		detections = []
+		pothole_detected = False
+		
+		if len(results) > 0:
+			result = results[0]
+			boxes = result.boxes
+			names = result.names if hasattr(result, 'names') else {}
+			
+			for box in boxes:
+				cls = int(box.cls[0])
+				conf = float(box.conf[0]) if hasattr(box, 'conf') else 0.0
+				
+				# Skip low-confidence detections
+				if conf < 0.35:
+					continue
+				
+				# Get label
+				label = names.get(cls, str(cls)) if isinstance(names, dict) else str(cls)
+				
+				# Check if it's a pothole
+				is_pothole = str(label).lower() == 'pothole' or cls == 0
+				if is_pothole:
+					pothole_detected = True
+				
+				# Get bounding box coordinates
+				xyxy = box.xyxy[0].cpu().numpy() if hasattr(box, 'xyxy') else None
+				if xyxy is not None:
+					x1, y1, x2, y2 = [float(v) for v in xyxy]
+					detections.append({
+						"class": label,
+						"confidence": conf,
+						"bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+						"is_pothole": is_pothole
+					})
+		
+		return {
+			"pothole_detected": pothole_detected,
+			"detections": detections,
+			"image_size": {"width": img.shape[1], "height": img.shape[0]},
+			"lat": lat,
+			"lon": lon
+		}
+	
+	except HTTPException:
+		raise
+	except Exception as e:
+		import traceback
+		tb = traceback.format_exc()
+		raise HTTPException(status_code=500, detail={"error": str(e), "trace": tb})
 
 
 def transform_and_predict(df_array: np.ndarray):

@@ -3,7 +3,8 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Landing from './components/Landing';
 import PredictTest from './components/PredictTest';
 import Predict from './components/Predict';
-import Potholes from './components/Potholes';
+import PotholesIssue from './components/Pothole_issue';
+import PotholesMap from './components/PotholesMap';
 import HeatmapView from './components/HeatmapView';
 import KnowYourWard from './components/KnowYourWard';
 import SafeRoute from './components/Route';
@@ -17,7 +18,8 @@ function App() {
             <Route path="/" element={<Landing/>}/>
             <Route path="/predict" element={<Predict/>}/>
             <Route path="/test-predict" element={<PredictTest/>}/>
-            <Route path="/potholes" element={<Potholes/>}/>
+            <Route path="/potholes" element={<PotholesIssue/>}/>
+            <Route path="/potholes-map" element={<PotholesMap/>}/>
             <Route path="/heatmap" element={<HeatmapView/>}/>
             <Route path="/know-your-ward" element={<KnowYourWard/>}/>
             <Route path="/route" element={<SafeRoute/>}/>
