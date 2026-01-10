@@ -10,8 +10,6 @@ function WardMap({ latitude, longitude, detectedWardId, wardName, floodRiskClass
   const layersRef = useRef({});
   const [isMapReady, setIsMapReady] = useState(false);
   const [error, setError] = useState(null);
-  const [heatmapData, setHeatmapData] = useState(null);
-  const [isHeatmapLoading, setIsHeatmapLoading] = useState(false);
 
   // Helper function to get risk color
   const getRiskColor = (risk) => {
@@ -232,86 +230,11 @@ function WardMap({ latitude, longitude, detectedWardId, wardName, floodRiskClass
   }, [isMapReady, API_BASE]); // Only re-run when map becomes ready or API_BASE changes
 
   // Load heatmap data
-  useEffect(() => {
-    if (!showHeatmap || !isMapReady) return;
-
-    const base = API_BASE?.replace(/\/$/, '') || 'http://127.0.0.1:8000';
-    setIsHeatmapLoading(true);
-    
-    fetch(`${base}/heatmap/ward_risk`)
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`Failed to load heatmap data: ${response.status}`);
-        }
-        return response.json();
-      })
-      .then(data => {
-        if (data && data.heatmap_data && Array.isArray(data.heatmap_data)) {
-          setHeatmapData(data.heatmap_data);
-        }
-      })
-      .catch(err => {
-        console.error('Error loading heatmap data:', err);
-        // Don't set error state - heatmap is optional
-      })
-      .finally(() => {
-        setIsHeatmapLoading(false);
-      });
-  }, [isMapReady, showHeatmap, API_BASE]);
+  // Heatmap rendering has been moved to a dedicated HeatmapView component.
+  // WardMap now focuses only on ward polygons and ward-level single-location results.
 
   // Add heatmap layer to map
-  useEffect(() => {
-    if (!mapInstanceRef.current || !heatmapData || !window.L || !window.L.heatLayer) return;
-
-    const L = window.L;
-
-    // Remove existing heatmap layer if present
-    if (layersRef.current.heatmap) {
-      try {
-        mapInstanceRef.current.removeLayer(layersRef.current.heatmap);
-      } catch (e) {
-        console.warn('Error removing existing heatmap:', e);
-      }
-    }
-
-    // Convert heatmap data to format expected by leaflet.heat
-    // Format: [[lat, lng, intensity], ...]
-    const heatmapPoints = heatmapData.map(point => [point[0], point[1], point[2]]);
-
-    // Find intensity range for gradient
-    const intensities = heatmapData.map(p => p[2]);
-    const minIntensity = Math.min(...intensities);
-    const maxIntensity = Math.max(...intensities);
-
-    // Create heatmap layer with gradient based on risk intensity
-    // Higher intensity = higher risk = red/orange colors
-    // Lower intensity = lower risk = yellow/green colors
-    try {
-      const heatmapLayer = L.heatLayer(heatmapPoints, {
-        radius: 35, // Radius of heat point (adjust based on zoom)
-        blur: 30,   // Blur factor for smooth gradient
-        maxZoom: 17,
-        max: maxIntensity, // Normalize to max intensity
-        gradient: {
-          // Color gradient: blue/green (low) -> yellow -> orange -> red (high)
-          0.0: 'blue',      // Very low risk
-          0.25: 'cyan',     // Low risk
-          0.5: 'lime',      // Medium-low risk
-          0.65: 'yellow',   // Medium risk
-          0.8: 'orange',    // Medium-high risk
-          1.0: 'red'        // High risk
-        },
-        minOpacity: 0.4,    // Minimum opacity (semi-transparent)
-        maxOpacity: 0.8     // Maximum opacity (more visible for high risk)
-      });
-
-      // Add to map (as overlay, on top of ward polygons)
-      heatmapLayer.addTo(mapInstanceRef.current);
-      layersRef.current.heatmap = heatmapLayer;
-    } catch (e) {
-      console.error('Error creating heatmap layer:', e);
-    }
-  }, [heatmapData, isMapReady]); // Re-run when heatmap data changes or map becomes ready
+  // Heatmap layer removed from WardMap to keep ward rendering isolated.
 
   // Update map when ward detection changes
   useEffect(() => {
@@ -391,17 +314,7 @@ function WardMap({ latitude, longitude, detectedWardId, wardName, floodRiskClass
           </div>
         </div>
       )}
-      {isHeatmapLoading && isMapReady && (
-        <div className="absolute top-4 right-4 bg-purple-900/90 backdrop-blur-sm border border-purple-400/30 rounded-lg px-3 py-2 z-20 shadow-lg">
-          <p className="text-white/80 text-xs flex items-center gap-2">
-            <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            Generating heatmap...
-          </p>
-        </div>
-      )}
+      
     </div>
   );
 }

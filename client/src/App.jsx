@@ -4,6 +4,8 @@ import Landing from './components/landing';
 import PredictTest from './components/PredictTest';
 import Predict from './components/Predict';
 import Potholes from './components/Potholes';
+import HeatmapView from './components/HeatmapView';
+import KnowYourWard from './components/KnowYourWard';
 function App() {
   return (
     <Router>
@@ -13,6 +15,8 @@ function App() {
             <Route path="/predict" element={<Predict/>}/>
             <Route path="/test-predict" element={<PredictTest/>}/>
             <Route path="/potholes" element={<Potholes/>}/>
+            <Route path="/heatmap" element={<HeatmapView/>}/>
+            <Route path="/know-your-ward" element={<KnowYourWard/>}/>
           </Routes>
         </div>
       </Router>
