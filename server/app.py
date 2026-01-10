@@ -125,6 +125,7 @@ class WardPredictionRequest(BaseModel):
     month: Optional[int] = None
     day_of_week: Optional[int] = None
     aggregation_method: Optional[str] = "mean"  # mean, max, median, percentile_75, percentile_90
+    ward_search: Optional[str] = None  # Ward number or name to search for directly
 
 
 def load_artifacts():
@@ -254,6 +255,9 @@ def load_dataset():
     return _DATA_DF
 
 
+# Cache for dataset statistics to avoid recomputing on every call
+_DATASET_STATS = None
+
 def derive_features_from_location(lat: float, lng: float):
     """Derive environmental features from latitude/longitude.
     
@@ -261,16 +265,29 @@ def derive_features_from_location(lat: float, lng: float):
     that match the training data distribution. Falls back to Delhi-specific heuristics
     if dataset is not loaded.
     """
-    # Try to load dataset statistics for better defaults
-    df = load_dataset()
+    global _DATASET_STATS
+    
+    # Initialize dataset statistics cache once
+    if _DATASET_STATS is None:
+        df = load_dataset()
+        if df is not None and not df.empty:
+            _DATASET_STATS = {
+                'elevation_mean': float(df['Elevation'].mean()) if 'Elevation' in df.columns else 210.0,
+                'elevation_std': float(df['Elevation'].std()) if 'Elevation' in df.columns else 15.0,
+                'elevation_min': float(df['Elevation'].min()) if 'Elevation' in df.columns else 180.0,
+                'elevation_max': float(df['Elevation'].max()) if 'Elevation' in df.columns else 250.0,
+                'has_data': True
+            }
+        else:
+            _DATASET_STATS = {'has_data': False}
     
     # Delhi bounds roughly: lat 28.4-28.9, lng 76.8-77.3
-    # Elevation estimation - use dataset statistics if available
-    if df is not None and not df.empty and 'Elevation' in df.columns:
-        elevation_mean = float(df['Elevation'].mean())
-        elevation_std = float(df['Elevation'].std())
-        elevation_min = float(df['Elevation'].min())
-        elevation_max = float(df['Elevation'].max())
+    # Elevation estimation - use cached dataset statistics if available
+    if _DATASET_STATS.get('has_data', False):
+        elevation_mean = _DATASET_STATS['elevation_mean']
+        elevation_std = _DATASET_STATS['elevation_std']
+        elevation_min = _DATASET_STATS['elevation_min']
+        elevation_max = _DATASET_STATS['elevation_max']
     else:
         # Fallback to Delhi-specific defaults
         elevation_mean = 210.0
@@ -289,14 +306,9 @@ def derive_features_from_location(lat: float, lng: float):
     elevation = elevation_base + elevation_variation
     elevation = max(elevation_min, min(elevation_max, elevation))
     
-    # Road density - use dataset statistics if available
-    if df is not None and not df.empty and 'Road_Density' in df.columns:
-        road_density_mean = float(df['Road_Density'].mean())
-        road_density_std = float(df['Road_Density'].std())
-        road_density_base = road_density_mean
-    else:
-        road_density_base = 0.5
-        road_density_std = 0.2
+    # Road density - use defaults (dataset stats not critical for road density)
+    road_density_base = 0.5
+    road_density_std = 0.2
     
     # Spatial variation: Central Delhi has higher road density
     road_density = road_density_base
@@ -308,46 +320,21 @@ def derive_features_from_location(lat: float, lng: float):
         road_density = max(0.1, road_density_base - 0.1)  # Lower in outskirts
     road_density = max(0.1, min(1.0, road_density))
     
-    # Rainfall - use dataset statistics if available, otherwise seasonal defaults
+    # Rainfall - use seasonal defaults
     current_month = datetime.datetime.now().month
-    if df is not None and not df.empty and 'Rain_mm' in df.columns and 'Hour' in df.columns:
-        try:
-            # Ensure Hour column is datetime type
-            df_hour = df.copy()
-            if not pd.api.types.is_datetime64_any_dtype(df_hour['Hour']):
-                df_hour['Hour'] = pd.to_datetime(df_hour['Hour'], errors='coerce')
-            # Use monthly average from dataset if available
-            monthly_rain = df_hour[df_hour['Hour'].dt.month == current_month]['Rain_mm']
-            if not monthly_rain.empty and monthly_rain.notna().any():
-                rain_mm = float(monthly_rain.mean())
-                rain_past3h = float(monthly_rain.mean() * 0.5) if rain_mm > 0 else 0.0
-            else:
-                raise ValueError("No monthly rain data")
-        except (ValueError, AttributeError, KeyError):
-            # Fallback to seasonal defaults
-            if 7 <= current_month <= 9:  # Monsoon
-                rain_mm = 15.0
-                rain_past3h = 8.0
-            elif current_month in [6, 10]:  # Pre/post monsoon
-                rain_mm = 8.0
-                rain_past3h = 4.0
-            else:  # Dry season
-                rain_mm = 2.0
-                rain_past3h = 1.0
-    else:
-        # Seasonal defaults for Delhi
-        if 7 <= current_month <= 9:  # Monsoon (July-September)
-            rain_mm = 15.0
-            rain_past3h = 8.0
-        elif current_month in [6, 10]:  # Pre/post monsoon
-            rain_mm = 8.0
-            rain_past3h = 4.0
-        else:  # Dry season
-            rain_mm = 2.0
-            rain_past3h = 1.0
+    # Seasonal defaults for Delhi
+    if 7 <= current_month <= 9:  # Monsoon (July-September)
+        rain_mm = 15.0
+        rain_past3h = 8.0
+    elif current_month in [6, 10]:  # Pre/post monsoon
+        rain_mm = 8.0
+        rain_past3h = 4.0
+    else:  # Dry season
+        rain_mm = 2.0
+        rain_past3h = 1.0
     
-    # Drain water level - use dataset statistics if available
-    if df is not None and not df.empty and 'Drain_Water_Level' in df.columns:
+    # Drain water level - use defaults
+    if False:  # Remove dataset dependency for drain water level
         drain_level_mean = float(df['Drain_Water_Level'].mean())
         drain_level_base = drain_level_mean
     else:
@@ -360,12 +347,8 @@ def derive_features_from_location(lat: float, lng: float):
         drain_level = min(2.5, drain_level * 1.5)
     drain_level = max(0.0, drain_level)
     
-    # Soil moisture - use dataset statistics if available
-    if df is not None and not df.empty and 'Soil_Moisture' in df.columns:
-        soil_moisture_mean = float(df['Soil_Moisture'].mean())
-        soil_moisture_base = soil_moisture_mean
-    else:
-        soil_moisture_base = 0.3
+    # Soil moisture - use defaults
+    soil_moisture_base = 0.3
     
     soil_moisture = soil_moisture_base
     if 7 <= current_month <= 9:  # Higher during monsoon
@@ -735,6 +718,8 @@ def predict_ward(request: WardPredictionRequest):
     }
     """
     try:
+        print(f"[PREDICT WARD] Received request: lat={request.latitude}, lon={request.longitude}, ward_search={request.ward_search}")
+        
         # Check if ward features are available
         if not is_ward_available():
             raise HTTPException(
@@ -742,35 +727,63 @@ def predict_ward(request: WardPredictionRequest):
                 detail="Ward boundaries not available. Run create_ward_boundaries.py first."
             )
         
-        # Validate coordinates
-        if not (28.0 <= request.latitude <= 29.5 and 76.0 <= request.longitude <= 78.0):
-            raise HTTPException(
-                status_code=400,
-                detail="Coordinates out of expected region for Delhi"
-            )
-        
-        # Find ward containing this location; fallback to nearest ward if outside polygons
-        ward_id = lookup_ward_id(request.latitude, request.longitude)  # type: ignore
-        lookup_method = "contains"
-        if ward_id is None:
-            try:
-                from .grid_index import lookup_nearest_ward  # type: ignore
-            except Exception:
-                from grid_index import lookup_nearest_ward  # type: ignore
-            ward_id = lookup_nearest_ward(request.latitude, request.longitude)  # type: ignore
-            lookup_method = "nearest"
-        if ward_id is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No ward found for coordinates ({request.latitude}, {request.longitude})"
-            )
+        # Check if ward search parameter is provided
+        if request.ward_search:
+            # Search by ward number or name
+            ward_id = None
+            ward_name_str = request.ward_search.strip()
+            
+            # Try direct ward number first
+            if ward_name_str.isdigit():
+                ward_id = int(ward_name_str)
+            else:
+                # Try searching by name using search_ward_by_name
+                if search_ward_by_name:
+                    result = search_ward_by_name(ward_name_str)  # type: ignore
+                    if result:
+                        ward_id = result.get('Ward_ID') or result.get('Ward_No')
+            
+            if ward_id is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Ward not found for search query: {ward_name_str}"
+                )
+            
+            lookup_method = "search"
+        else:
+            # Validate coordinates
+            if not (28.0 <= request.latitude <= 29.5 and 76.0 <= request.longitude <= 78.0):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Coordinates out of expected region for Delhi"
+                )
+            
+            # Find ward containing this location; fallback to nearest ward if outside polygons
+            ward_id = lookup_ward_id(request.latitude, request.longitude)  # type: ignore
+            lookup_method = "contains"
+            if ward_id is None:
+                try:
+                    from .grid_index import lookup_nearest_ward  # type: ignore
+                except Exception:
+                    from grid_index import lookup_nearest_ward  # type: ignore
+                ward_id = lookup_nearest_ward(request.latitude, request.longitude)  # type: ignore
+                lookup_method = "nearest"
+            if ward_id is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No ward found for coordinates ({request.latitude}, {request.longitude})"
+                )
         
         # Get ward info
         ward_info = get_ward_info(ward_id)  # type: ignore
         ward_name = ward_info.get("Ward_Name") if ward_info else f"Ward_{ward_id}"
         
+        print(f"[PREDICT WARD] Ward ID: {ward_id}, Ward Name: {ward_name}, Lookup Method: {lookup_method}")
+        
         # Get all grids in this ward
         grid_ids = get_grids_in_ward(ward_id)  # type: ignore
+        
+        print(f"[PREDICT WARD] Found {len(grid_ids) if grid_ids else 0} grids for ward {ward_id}")
         
         # Parse time info
         now = datetime.datetime.now()
@@ -791,6 +804,10 @@ def predict_ward(request: WardPredictionRequest):
         df = load_dataset()
         if df is None:
             raise HTTPException(status_code=500, detail="Dataset not available on server")
+        
+        # Pre-convert Hour column to datetime once (huge performance boost)
+        if not df.empty and 'Hour' in df.columns and not np.issubdtype(df["Hour"].dtype, np.datetime64):
+            df = df.assign(Hour=pd.to_datetime(df["Hour"], errors='coerce'))
         
         grid_predictions = {}  # grid_id -> risk_score
 
@@ -816,79 +833,90 @@ def predict_ward(request: WardPredictionRequest):
                 score = WardAggregator.class_to_score(class_id)  # type: ignore
                 grid_predictions[-1] = score  # synthetic grid id for fallback
         else:
+            # OPTIMIZATION: Compute derived features ONCE instead of per-grid
+            feats_loc = derive_features_from_location(request.latitude, request.longitude)
+            
+            # OPTIMIZATION: Filter dataset once for all grids in this ward
+            df_ward = df[df["Grid_ID"].isin(grid_ids)]
+            
+            # OPTIMIZATION: Batch process all grids for predictions
+            batch_inputs = []
+            batch_grid_ids = []
+            
             for grid_id in grid_ids:
                 try:
-                    # Get dataset rows for this grid
-                    df_grid = df[df["Grid_ID"] == int(grid_id)]
-                    if df_grid.empty:
-                        continue
+                    # Try to get dataset rows for this grid
+                    df_grid = df_ward[df_ward["Grid_ID"] == int(grid_id)]
                     
-                    # Ensure Hour is datetime
-                    if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
-                        try:
-                            df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
-                        except Exception:
-                            pass
-                    
-                    # Filter by month and hour
-                    df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
-                    if df_sel.empty:
-                        df_sel = df_grid.head(1)
-                    
-                    row = df_sel.iloc[0]
-                    
-                    # Extract features
-                    def val_or_default(name, default):
-                        v = row.get(name)
-                        try:
-                            if v is None or (isinstance(v, float) and np.isnan(v)):
+                    if not df_grid.empty:
+                        # Filter by month and hour
+                        df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
+                        if df_sel.empty:
+                            df_sel = df_grid.head(1)
+                        
+                        row = df_sel.iloc[0]
+                        
+                        # Extract features with fallback
+                        def val_or_default(name, default):
+                            v = row.get(name)
+                            try:
+                                if v is None or (isinstance(v, float) and np.isnan(v)):
+                                    return default
+                                return float(v)
+                            except Exception:
                                 return default
-                            return float(v)
-                        except Exception:
-                            return default
+                        
+                        Elevation = val_or_default("Elevation", feats_loc["Elevation"])
+                        Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
+                        Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
+                        Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
+                        Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
+                        Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
+                    else:
+                        # Grid not in dataset, use derived features
+                        Elevation = feats_loc["Elevation"]
+                        Road_Density = feats_loc["Road_Density"]
+                        Rain_mm = feats_loc["Rain_mm"]
+                        Rain_Past3h = feats_loc["Rain_Past3h"]
+                        Drain_Water_Level = feats_loc["Drain_Water_Level"]
+                        Soil_Moisture = feats_loc["Soil_Moisture"]
                     
-                    # Derive features from location for missing values
-                    feats_loc = derive_features_from_location(request.latitude, request.longitude)
-                    
-                    Elevation = val_or_default("Elevation", feats_loc["Elevation"])
-                    Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
-                    Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
-                    Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
-                    Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
-                    Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
-                    
-                    # Predict
-                    arr = np.array([
-                        [
-                            Elevation,
-                            Road_Density,
-                            Rain_mm,
-                            Rain_Past3h,
-                            Drain_Water_Level,
-                            Soil_Moisture,
-                            int(hour),
-                            int(month),
-                            int(dow),
-                        ]
+                    # Add to batch
+                    batch_inputs.append([
+                        Elevation, Road_Density, Rain_mm, Rain_Past3h,
+                        Drain_Water_Level, Soil_Moisture,
+                        int(hour), int(month), int(dow)
                     ])
-                    
-                    results = transform_and_predict(arr)
-                    if results:
-                        # Convert class prediction to normalized score
-                        # class 0=High (0.8), 1=Low (0.2), 2=Medium (0.5)
-                        class_id = results[0]["class"]
-                        score = WardAggregator.class_to_score(class_id)  # type: ignore
-                        grid_predictions[grid_id] = score
+                    batch_grid_ids.append(grid_id)
                 
                 except Exception as e:
-                    print(f"[PREDICT WARD] Error predicting grid {grid_id}: {e}")
+                    print(f"[PREDICT WARD] Error preparing grid {grid_id}: {e}")
                     continue
+            
+            # OPTIMIZATION: Batch predict all grids at once
+            if batch_inputs:
+                arr = np.array(batch_inputs)
+                results = transform_and_predict(arr)
+                
+                for i, grid_id in enumerate(batch_grid_ids):
+                    if i < len(results):
+                        class_id = results[i]["class"]
+                        score = WardAggregator.class_to_score(class_id)  # type: ignore
+                        grid_predictions[grid_id] = score
         
         # Aggregate predictions
         if not grid_predictions:
+            error_details = {
+                "error": "Could not generate predictions for any grid in the ward",
+                "ward_id": ward_id,
+                "ward_name": ward_name,
+                "grid_count": len(grid_ids) if grid_ids else 0,
+                "location": {"latitude": request.latitude, "longitude": request.longitude},
+                "suggestion": "This ward may not have grid data in the dataset. Try a different location or check server logs."
+            }
             raise HTTPException(
                 status_code=500,
-                detail="Could not generate predictions for any grid in the ward"
+                detail=error_details
             )
         
         aggregation_method = request.aggregation_method or "mean"
