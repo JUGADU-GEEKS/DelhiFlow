@@ -6,6 +6,7 @@ import Predict from './components/Predict';
 import Potholes from './components/Potholes';
 import HeatmapView from './components/HeatmapView';
 import KnowYourWard from './components/KnowYourWard';
+import SafeRoute from './components/Route';
 import Chatbot from './components/Chatbot';
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
             <Route path="/potholes" element={<Potholes/>}/>
             <Route path="/heatmap" element={<HeatmapView/>}/>
             <Route path="/know-your-ward" element={<KnowYourWard/>}/>
+            <Route path="/route" element={<SafeRoute/>}/>
           </Routes>
           {/* Chatbot available on all pages */}
           <Chatbot />

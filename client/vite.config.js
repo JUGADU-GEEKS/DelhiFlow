@@ -10,8 +10,26 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
-  },
-  theme: {
+  },  server: {
+    proxy: {
+      '/safe-route': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/potholes': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },  theme: {
     extend: {
       fontFamily: {
         poppins: ['Poppins', 'sans-serif'],

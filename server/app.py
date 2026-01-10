@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Form, File, UploadFile
 from pydantic import BaseModel, conlist
-from typing import List, Optional
+from typing import List, Optional, Dict
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import os
@@ -459,6 +459,95 @@ def predict_location(request: LocationRequest):
                 "day_of_week": day_of_week
             },
             "prediction": results[0] if results else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.post("/api/location/risk")
+def location_risk(request: LocationRequest):
+    """Get flood risk score for a specific location.
+    
+    This endpoint uses the trained model to predict flood risk at a given coordinate.
+    It derives environmental features from the location and returns an authentic risk score.
+    
+    Request JSON:
+    {
+      "latitude": 28.6139,
+      "longitude": 77.2090
+    }
+    
+    Response:
+    {
+      "latitude": 28.6139,
+      "longitude": 77.2090,
+      "flood_risk": 0.75,           // Risk score 0-1
+      "flood_risk_class": "High",   // "Low", "Medium", or "High"
+      "confidence": 82.5
+    }
+    """
+    try:
+        # Derive environmental features from location
+        features = derive_features_from_location(request.latitude, request.longitude)
+        
+        # Use current time
+        now = datetime.datetime.now()
+        hour = request.hour_of_day if request.hour_of_day is not None else now.hour
+        month = request.month if request.month is not None else now.month
+        day_of_week = request.day_of_week if request.day_of_week is not None else now.weekday()
+        
+        # Create prediction input
+        grid_input = GridInput(
+            Elevation=features["Elevation"],
+            Road_Density=features["Road_Density"], 
+            Rain_mm=features["Rain_mm"],
+            Rain_Past3h=features["Rain_Past3h"],
+            Drain_Water_Level=features["Drain_Water_Level"],
+            Soil_Moisture=features["Soil_Moisture"],
+            hour_of_day=hour,
+            month=month,
+            day_of_week=day_of_week
+        )
+        
+        # Make prediction
+        arr = np.array([[
+            grid_input.Elevation, grid_input.Road_Density, grid_input.Rain_mm, 
+            grid_input.Rain_Past3h, grid_input.Drain_Water_Level, grid_input.Soil_Moisture,
+            grid_input.hour_of_day, grid_input.month, grid_input.day_of_week
+        ]])
+        results = transform_and_predict(arr)
+        pred = results[0] if results else None
+        
+        if not pred:
+            raise HTTPException(status_code=500, detail="Prediction failed")
+        
+        # Convert prediction class to risk score and class name
+        # Model classes: 0=High, 1=Medium, 2=Low (based on typical flood model)
+        # But let's use the confidence as our risk score
+        risk_class_map = {0: "High", 1: "Medium", 2: "Low"}
+        class_id = pred["class"]
+        risk_score = pred["confidence"] / 100.0  # Convert percentage to 0-1 scale
+        
+        # For High risk: score is high (0.7-1.0)
+        # For Medium risk: score is medium (0.3-0.7)
+        # For Low risk: score is low (0.0-0.3)
+        if class_id == 0:  # High
+            risk_score = 0.7 + (risk_score * 0.3)  # 0.7-1.0
+        elif class_id == 1:  # Medium
+            risk_score = 0.3 + (risk_score * 0.4)  # 0.3-0.7
+        else:  # Low
+            risk_score = risk_score * 0.3  # 0.0-0.3
+        
+        return {
+            "latitude": request.latitude,
+            "longitude": request.longitude,
+            "flood_risk": round(risk_score, 3),
+            "flood_risk_class": risk_class_map.get(class_id, "Unknown"),
+            "confidence": pred["confidence"]
         }
         
     except HTTPException:
@@ -1914,4 +2003,290 @@ Risk Score: {risk_score if risk_score != 'N/A' else 'Not Available'}
     except Exception as ex:
         tb = traceback.format_exc()
         print(f"[CHAT] Error in chat endpoint: {tb}")
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+# ========================= SAFE ROUTE FINDING ENDPOINTS =======================
+
+try:
+    from .safe_route import get_route_manager, load_sample_roads  # type: ignore
+except Exception:
+    try:
+        from safe_route import get_route_manager, load_sample_roads  # type: ignore
+    except Exception:
+        get_route_manager = None  # type: ignore
+        load_sample_roads = None  # type: ignore
+
+
+class RouteRequest(BaseModel):
+    """Request model for finding safe routes."""
+    source_lat: float
+    source_lon: float
+    destination_lat: float
+    destination_lon: float
+
+
+class RouteInitRequest(BaseModel):
+    """Request model to initialize road network."""
+    roads_geojson: Optional[Dict] = None
+    use_sample_data: bool = True
+
+
+@app.post("/safe-route/initialize")
+def initialize_route_system(request: RouteInitRequest):
+    """Initialize safe route system with road network data.
+    
+    Request JSON:
+    {
+      "roads_geojson": {GeoJSON FeatureCollection},
+      "use_sample_data": false  // if true, uses sample roads for demo
+    }
+    
+    Response:
+    {
+      "status": "success",
+      "segments_count": 15,
+      "timestamp": "2025-01-10T..."
+    }
+    """
+    try:
+        if get_route_manager is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Safe route system not available"
+            )
+        
+        manager = get_route_manager()
+        
+        # Load roads from request or use sample data
+        if request.use_sample_data or not request.roads_geojson:
+            if load_sample_roads is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Sample data loader not available"
+                )
+            roads_geojson = load_sample_roads()
+            print("[SAFE_ROUTE] Using sample road network")
+        else:
+            roads_geojson = request.roads_geojson
+        
+        # Add roads to manager
+        segment_count = manager.add_road_network(roads_geojson)
+        
+        return {
+            "status": "success",
+            "segments_count": segment_count,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "message": "Road network initialized successfully"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        print(f"[SAFE_ROUTE] Initialize error: {tb}")
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.post("/safe-route/find")
+def find_safe_route(request: RouteRequest):
+    """Find multiple alternative safe routes between two points.
+    
+    Returns the best route plus alternatives, allowing user to choose based on real-time
+    flood risk and other factors.
+    """
+    try:
+        if get_route_manager is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Safe route system not available"
+            )
+        
+        manager = get_route_manager()
+        source = (request.source_lon, request.source_lat)
+        destination = (request.destination_lon, request.destination_lat)
+        
+        # Find multiple alternative routes
+        routes = manager.find_multiple_routes(source, destination, num_routes=3)
+        
+        if not routes:
+            raise HTTPException(
+                status_code=404,
+                detail="No route found between source and destination"
+            )
+        
+        # Prepare visualization data for all routes
+        from safe_route import convert_numpy_types
+        
+        routes_data = []
+        for route in routes:
+            viz_data = manager.get_route_visualization(route)
+            routes_data.append(viz_data)
+        
+        # Return all routes with the best one highlighted
+        return convert_numpy_types({
+            "primary_route": routes_data[0],  # Best route (lowest risk)
+            "alternative_routes": routes_data[1:],  # Alternative options
+            "all_routes": routes_data,
+            "timestamp": datetime.datetime.now().isoformat()
+        })
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        print(f"[SAFE_ROUTE] Find error: {tb}")
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.get("/safe-route/segments")
+def get_segments():
+    """Get all road segments for visualization.
+    
+    Response:
+    {
+      "segments": [
+        {
+          "segment_id": "seg_0",
+          "geometry": {type: "LineString", coordinates: [...]},
+          "ward_id": 5,
+          "ward_name": "Ward 5",
+          "flood_risk": 0.45,
+          "elevation": 220.5,
+          "drain_distance": 150.2,
+          "is_underpass": false,
+          "risk_score": 0.42,
+          "risk_level": "medium",
+          "length": 75.3
+        },
+        ...
+      ],
+      "total_segments": 45
+    }
+    """
+    try:
+        if get_route_manager is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Safe route system not available"
+            )
+        
+        manager = get_route_manager()
+        segments = manager.get_all_segments()
+        
+        # Import convert_numpy_types from safe_route module
+        from safe_route import convert_numpy_types
+        
+        result = {
+            "segments": segments,
+            "total_segments": len(segments),
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        
+        return convert_numpy_types(result)
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+@app.get("/safe-route/stats")
+def get_route_stats():
+    """Get statistics about the road network.
+    
+    Response:
+    {
+      "total_segments": 45,
+      "by_risk_level": {
+        "high": 8,
+        "medium": 18,
+        "low": 19
+      },
+      "by_ward": {
+        "Ward 5": 12,
+        "Ward 3": 15,
+        ...
+      },
+      "elevation_range": {"min": 195.2, "max": 245.8},
+      "timestamp": "2025-01-10T..."
+    }
+    """
+    try:
+        if get_route_manager is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Safe route system not available"
+            )
+        
+        manager = get_route_manager()
+        segments = manager.get_all_segments()
+        
+        # ADD DIAGNOSTIC INFO
+        print(f"\n[STATS] === DIAGNOSTIC INFO ===")
+        print(f"[STATS] Segments in manager: {len(manager.segments)}")
+        print(f"[STATS] Graph nodes in manager: {len(manager.graph)}")
+        print(f"[STATS] Segment graph edges: {len(manager.segment_graph)}")
+        print(f"[STATS] Segments returned by get_all_segments: {len(segments)}")
+        
+        if manager.segments:
+            first_seg_id = list(manager.segments.keys())[0]
+            first_seg = manager.segments[first_seg_id]
+            print(f"[STATS] First segment ID: {first_seg_id}")
+            print(f"[STATS] First segment coords: {first_seg.geometry['coordinates'][:2]}")
+        
+        if manager.graph:
+            sample_nodes = list(manager.graph.keys())[:3]
+            for node in sample_nodes:
+                print(f"[STATS] Node {node}: {len(manager.graph[node])} neighbors")
+        
+        if not segments:
+            return {
+                "total_segments": 0,
+                "by_risk_level": {},
+                "by_ward": {},
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+        
+        # Compute statistics
+        risk_counts = {"high": 0, "medium": 0, "low": 0}
+        ward_counts = {}
+        elevations = []
+        
+        for seg in segments:
+            risk_level = seg.get("risk_level", "unknown")
+            if risk_level in risk_counts:
+                risk_counts[risk_level] += 1
+            
+            ward_name = seg.get("ward_name", "Unknown")
+            if ward_name:
+                ward_counts[ward_name] = ward_counts.get(ward_name, 0) + 1
+            
+            if seg.get("elevation"):
+                elevations.append(seg["elevation"])
+        
+        # Import convert_numpy_types from safe_route module
+        from safe_route import convert_numpy_types
+        
+        stats = {
+            "total_segments": len(segments),
+            "by_risk_level": risk_counts,
+            "by_ward": ward_counts,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        
+        if elevations:
+            stats["elevation_range"] = {
+                "min": float(min(elevations)),
+                "max": float(max(elevations)),
+                "mean": float(np.mean(elevations))
+            }
+        
+        return convert_numpy_types(stats)
+    
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
         raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
