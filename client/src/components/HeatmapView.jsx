@@ -15,11 +15,14 @@ function HeatmapView() {
   const selectedLayerRef = useRef(null);
 
   const [isMapReady, setIsMapReady] = useState(false);
+  const [isMapInitialized, setIsMapInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const [geojson, setGeojson] = useState(null);
   const [batchResults, setBatchResults] = useState(null);
+  const [processedCount, setProcessedCount] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
 
   const [searchText, setSearchText] = useState('');
   const [selectedWard, setSelectedWard] = useState(null);
@@ -60,6 +63,8 @@ function HeatmapView() {
     if (!isMapReady || mapInstanceRef.current) return;
 
     const L = window.L;
+    if (!mapRef.current) return; // Ensure map container exists
+    
     const map = L.map(mapRef.current).setView([28.6139, 77.2090], 11);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -67,34 +72,47 @@ function HeatmapView() {
     }).addTo(map);
 
     mapInstanceRef.current = map;
+    setIsMapInitialized(true); // Trigger re-render so fetch effect runs
 
     return () => {
-      map.remove();
+      if (mapInstanceRef.current) {
+        map.remove();
+      }
       mapInstanceRef.current = null;
+      setIsMapInitialized(false);
     };
   }, [isMapReady]);
 
   /* ---------------- LOAD GEOJSON + HEATMAP ---------------- */
   useEffect(() => {
-    if (!isMapReady || !mapInstanceRef.current) return;
+    if (!isMapReady || !isMapInitialized || !mapInstanceRef.current) {
+      console.log('Data fetch skipped:', { isMapReady, isMapInitialized, hasMapInstance: !!mapInstanceRef.current });
+      return;
+    }
 
     const base = API_BASE?.replace(/\/$/, '') || 'http://127.0.0.1:8000';
+    console.log('Starting data fetch...');
     setIsLoading(true);
     setError(null);
+    setProcessedCount(0);
+    setTotalCount(0);
 
-    // Fetch GeoJSON first, then batch predictions
+    // Fetch GeoJSON first, then batch predictions in chunks
     fetch(`${base}/wards/geojson`)
       .then(res => {
+        console.log('GeoJSON fetch response:', res.status, res.statusText);
         if (!res.ok) throw new Error(`GeoJSON fetch failed: ${res.status} ${res.statusText}`);
         return res.json();
       })
       .then(geo => {
+        console.log('GeoJSON parsed, features count:', geo?.features?.length);
         if (!geo || !geo.features || !Array.isArray(geo.features)) {
           throw new Error('Invalid GeoJSON structure');
         }
         const L = window.L;
         if (!L) throw new Error('Leaflet not available');
         
+        console.log('Calculating centroids...');
         // Calculate centroids from GeoJSON features
         const centroids = geo.features.map(f => {
           try {
@@ -111,42 +129,113 @@ function HeatmapView() {
           }
         }).filter(c => c !== null);
 
+        console.log('Centroids calculated:', centroids.length);
         if (centroids.length === 0) {
           throw new Error('No valid centroids found in GeoJSON');
         }
 
-        // Request batch predictions
-        return fetch(`${base}/predict_ward_batch`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(centroids.map(c => ({ latitude: c.latitude, longitude: c.longitude })))
-        }).then(r => {
-          if (!r.ok) {
-            throw new Error(`Batch prediction API error: ${r.status} ${r.statusText}`);
-          }
-          return r.json();
-        }).then(resp => ({ geo, centroids, resp }));
-      })
-      .then(({ geo, centroids, resp }) => {
-        // Validate response structure
-        if (!resp || !resp.results || !Array.isArray(resp.results)) {
-          throw new Error('Invalid API response structure');
+        // Set GeoJSON immediately so map can render
+        setGeojson(geo);
+        setTotalCount(centroids.length);
+
+        // Process predictions in chunks for incremental updates
+        const CHUNK_SIZE = 25; // Process 25 predictions at a time
+        const chunks = [];
+        for (let i = 0; i < centroids.length; i += CHUNK_SIZE) {
+          chunks.push(centroids.slice(i, i + CHUNK_SIZE));
         }
 
-        // Set GeoJSON and batch results - this will trigger the rendering effect
-        setGeojson(geo);
-        setBatchResults({ centroids, batchResp: resp });
-        
-        console.log(`Data loaded: ${resp.results.length} predictions, ${geo.features.length} wards`);
-    })
-    .catch((err) => {
-      console.error('Heatmap loading error:', err);
-      setError(`Failed to load heatmap: ${err.message || 'Unknown error'}`);
-    })
-    .finally(() => {
-      setIsLoading(false);
-    });
-  }, [isMapReady, API_BASE]);
+        console.log(`Processing ${centroids.length} predictions in ${chunks.length} chunks of ${CHUNK_SIZE}`);
+
+        // Store all results as they come in
+        const allResults = [];
+        let processedSoFar = 0;
+
+        // Process chunks sequentially to avoid overwhelming the server
+        const processChunks = async () => {
+          for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+            const chunk = chunks[chunkIdx];
+            const requestBody = chunk.map(c => ({ latitude: c.latitude, longitude: c.longitude }));
+
+            try {
+              console.log(`Processing chunk ${chunkIdx + 1}/${chunks.length} (${chunk.length} predictions)...`);
+              
+              const response = await fetch(`${base}/predict_ward_batch`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody)
+              });
+
+              if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`Chunk ${chunkIdx + 1} error:`, errorText);
+                // Add error results for this chunk
+                chunk.forEach(c => {
+                  allResults.push({
+                    error: `HTTP ${response.status}: ${errorText.substring(0, 100)}`,
+                    location: { latitude: c.latitude, longitude: c.longitude }
+                  });
+                });
+              } else {
+                const resp = await response.json();
+                if (resp && resp.results && Array.isArray(resp.results)) {
+                  allResults.push(...resp.results);
+                  processedSoFar += resp.results.filter(r => !r.error).length;
+                  setProcessedCount(processedSoFar);
+                  console.log(`Chunk ${chunkIdx + 1} completed: ${processedSoFar}/${centroids.length} total`);
+                  
+                  // Update batch results incrementally so heatmap can render
+                  setBatchResults({
+                    centroids: centroids,
+                    batchResp: {
+                      results: allResults,
+                      processed: processedSoFar,
+                      total: centroids.length
+                    }
+                  });
+                }
+              }
+            } catch (err) {
+              console.error(`Error processing chunk ${chunkIdx + 1}:`, err);
+              // Add error results for this chunk
+              chunk.forEach(c => {
+                allResults.push({
+                  error: err.message || 'Unknown error',
+                  location: { latitude: c.latitude, longitude: c.longitude }
+                });
+              });
+            }
+          }
+
+          // Final update with all results
+          console.log(`All chunks processed: ${allResults.length} total results`);
+          setBatchResults({
+            centroids: centroids,
+            batchResp: {
+              results: allResults,
+              processed: allResults.filter(r => !r.error).length,
+              failed: allResults.filter(r => r.error).length,
+              total: centroids.length
+            }
+          });
+          setProcessedCount(allResults.length);
+          setIsLoading(false);
+        };
+
+        // Start processing chunks
+        processChunks().catch(err => {
+          console.error('Error in chunk processing:', err);
+          setError(`Failed to process predictions: ${err.message || 'Unknown error'}`);
+          setIsLoading(false);
+        });
+      })
+      .catch((err) => {
+        console.error('Heatmap loading error:', err);
+        console.error('Error stack:', err.stack);
+        setError(`Failed to load heatmap: ${err.message || 'Unknown error'}`);
+        setIsLoading(false);
+      });
+  }, [isMapReady, isMapInitialized, API_BASE]);
 
   /* ---------------- BUILD WARD LOOKUP MAP ---------------- */
   // Build comprehensive ward lookup map combining GeoJSON + batch predictions
@@ -162,14 +251,25 @@ function HeatmapView() {
     const centroids = batchResults.centroids;
     
     if (!resp || !resp.results || !Array.isArray(resp.results) || !centroids) {
+      console.warn('Missing data for ward lookup map:', { 
+        hasResp: !!resp, 
+        hasResults: !!(resp && resp.results), 
+        resultsLength: resp?.results?.length,
+        hasCentroids: !!centroids,
+        centroidsLength: centroids?.length 
+      });
       return;
     }
+
+    console.log(`Building ward lookup map: ${geojson.features.length} GeoJSON features, ${resp.results.length} prediction results, ${centroids.length} centroids`);
 
     // Build comprehensive ward lookup map: { wardNumber: { wardName, wardNumber, riskValue, riskLevel, lat, lng } }
     const lookup = new Map();
     
-    // First, index GeoJSON features by normalized ward number
+    // First, index GeoJSON features by normalized ward number AND by index
     const geoJsonMap = new Map();
+    const geoJsonByIndex = []; // Array for index-based matching
+    
     geojson.features.forEach((feature, idx) => {
       const props = feature.properties || {};
       let wardId = props.Ward_ID !== undefined ? props.Ward_ID : props.Ward_No;
@@ -179,7 +279,7 @@ function HeatmapView() {
         const wardNumberStr = String(wardId).trim();
         const wardNumberNum = parseInt(wardId, 10);
         
-        // Get centroid for this feature
+        // Get centroid for this feature (try matching first, then use index)
         let centroid = centroids.find(c => {
           const cWardId = c.wardId;
           return cWardId == wardId || String(cWardId) === String(wardId);
@@ -190,56 +290,95 @@ function HeatmapView() {
         }
         
         if (centroid) {
-          geoJsonMap.set(wardNumberStr, {
+          const geoData = {
             feature,
             centroid,
             wardId: wardId,
             wardNumberStr,
             wardNumberNum: isNaN(wardNumberNum) ? null : wardNumberNum
-          });
+          };
+          
+          geoJsonMap.set(wardNumberStr, geoData);
           // Also index by numeric value if valid
           if (!isNaN(wardNumberNum)) {
-            geoJsonMap.set(wardNumberNum, {
-              feature,
-              centroid,
-              wardId: wardId,
-              wardNumberStr,
-              wardNumberNum
-            });
+            geoJsonMap.set(wardNumberNum, geoData);
+            geoJsonMap.set(String(wardNumberNum), geoData);
           }
         }
       }
+      
+      // Store by index for fallback matching
+      if (idx < centroids.length) {
+        geoJsonByIndex[idx] = {
+          feature,
+          centroid: centroids[idx],
+          wardId: props.Ward_ID !== undefined ? props.Ward_ID : props.Ward_No,
+          index: idx
+        };
+      }
     });
 
-    // Now merge with batch prediction results
-    resp.results.forEach(result => {
-      if (result.error) return;
+    console.log(`Indexed ${geoJsonMap.size} GeoJSON entries, ${geoJsonByIndex.length} by index`);
+
+    // Now merge with batch prediction results - use index-based matching as primary strategy
+    // since predictions are returned in the same order as request (which matches GeoJSON order)
+    let matchedCount = 0;
+    let unmatchedCount = 0;
+    
+    resp.results.forEach((result, resultIdx) => {
+      if (result.error) {
+        console.warn(`Prediction result ${resultIdx} has error:`, result.error);
+        return;
+      }
 
       const wardId = result.Ward_ID;
-      if (wardId == null || wardId === undefined) return;
+      if (wardId == null || wardId === undefined) {
+        console.warn(`Prediction result ${resultIdx} has no Ward_ID`);
+        return;
+      }
 
       // Normalize ward ID to string and number
       const wardNumberStr = String(wardId).trim();
       const wardNumberNum = parseInt(wardId, 10);
-      const isValidNum = !isNaN(wardNumberNum) && wardNumberNum > 0;
+      const isValidNum = !isNaN(wardNumberNum) && wardNumberNum >= 0;
 
-      // Find matching GeoJSON data
-      let geoData = geoJsonMap.get(wardNumberStr);
-      if (!geoData && isValidNum) {
-        geoData = geoJsonMap.get(wardNumberNum);
+      // Try to find matching GeoJSON data - use index first, then Ward_ID match
+      let geoData = null;
+      
+      // Strategy 1: Index-based matching (most reliable since order is preserved)
+      if (resultIdx < geoJsonByIndex.length) {
+        geoData = geoJsonByIndex[resultIdx];
+        // Verify Ward_ID matches if available
+        if (geoData && geoData.wardId != null) {
+          const geoWardId = String(geoData.wardId);
+          const resultWardId = String(wardId);
+          if (geoWardId !== resultWardId) {
+            console.warn(`Index ${resultIdx}: Ward_ID mismatch - GeoJSON: ${geoWardId}, Result: ${resultWardId}, using index match anyway`);
+          }
+        }
       }
-      if (!geoData && isValidNum) {
-        geoData = geoJsonMap.get(String(wardNumberNum));
+      
+      // Strategy 2: Ward_ID based matching (fallback)
+      if (!geoData) {
+        geoData = geoJsonMap.get(wardNumberStr);
+        if (!geoData && isValidNum) {
+          geoData = geoJsonMap.get(wardNumberNum);
+        }
+        if (!geoData && isValidNum) {
+          geoData = geoJsonMap.get(String(wardNumberNum));
+        }
       }
 
       if (!geoData) {
-        console.warn(`No GeoJSON data found for Ward_ID: ${wardId}`);
+        console.warn(`No GeoJSON data found for Ward_ID: ${wardId} at index ${resultIdx}`);
+        unmatchedCount++;
         return;
       }
 
+      matchedCount++;
       const { feature, centroid } = geoData;
       const props = feature.properties || {};
-      const wardName = props.Ward_Name || `Ward ${wardId}`;
+      const wardName = props.Ward_Name || props.WardName || `Ward ${wardId}`;
       
       // Get risk values
       let riskValue = result.Flood_Risk_Score;
@@ -281,8 +420,8 @@ function HeatmapView() {
       lookup.set(wardId, wardData);
     });
 
+    console.log(`Built ward lookup map: ${lookup.size} entries (matched: ${matchedCount}, unmatched: ${unmatchedCount})`);
     setWardLookupMap(lookup);
-    console.log(`Built ward lookup map with ${lookup.size} entries`);
   }, [geojson, batchResults]);
 
   /* ---------------- UPDATE HEATMAP WHEN DATA CHANGES ---------------- */
@@ -649,6 +788,11 @@ function HeatmapView() {
                   <div className="text-center">
                     <div className="animate-spin h-10 w-10 border-4 border-purple-400 border-t-transparent rounded-full mx-auto mb-4"></div>
                     <p className="text-white/80 text-sm font-light">Loading heatmap data...</p>
+                    {totalCount > 0 && (
+                      <p className="text-white/60 text-xs mt-2">
+                        Processed {processedCount}/{totalCount} wards ({Math.round((processedCount / totalCount) * 100)}%)
+                      </p>
+                    )}
                   </div>
         </div>
       )}

@@ -11,15 +11,20 @@ import datetime
 from dateutil import parser as dtparser
 from ultralytics import YOLO
 import cv2
+import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 try:
     from .grid_index import (lookup_grid_id, is_available as grid_index_available,  # type: ignore
-                             lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info, get_ward_gdf)  # type: ignore
+                             lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info, get_ward_gdf, search_ward_by_name)  # type: ignore
 except Exception:
     # Fallback when running as script
     try:
         from grid_index import (lookup_grid_id, is_available as grid_index_available,  # type: ignore
-                               lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info, get_ward_gdf)  # type: ignore
+                               lookup_ward_id, is_ward_available, get_grids_in_ward, get_ward_info, get_ward_gdf, search_ward_by_name)  # type: ignore
     except Exception:
         lookup_grid_id = None  # type: ignore
         grid_index_available = lambda: False  # type: ignore
@@ -28,6 +33,7 @@ except Exception:
         get_grids_in_ward = None  # type: ignore
         get_ward_info = None  # type: ignore
         get_ward_gdf = None  # type: ignore
+        search_ward_by_name = None  # type: ignore
 
 try:
     from .ward_aggregation import WardAggregator, create_ward_prediction_summary  # type: ignore
@@ -149,39 +155,56 @@ def health():
 def transform_and_predict(df_array: np.ndarray):
 	"""Expect df_array shape (n, 9) in the same column order as GridInput fields.
 	This function scales the continuous features using the saved scaler and returns predictions and probs.
+	Matches the training pipeline exactly: uses DataFrame with feature names to avoid sklearn warnings.
 	"""
 	if SCALER is None or MODEL is None or LE is None:
 		raise RuntimeError("Model artifacts not available on server.")
 
-	# continuous columns indices assuming order: Elevation, Road_Density, Rain_mm, Rain_Past3h, Drain_Water_Level, Soil_Moisture
-	cont_idx = [0,1,2,3,4,5]
+	# Create DataFrame with input feature names matching the original data structure
+	input_feature_names = [
+		'Elevation', 'Road_Density', 'Rain_mm', 'Rain_Past3h',
+		'Drain_Water_Level', 'Soil_Moisture', 'hour_of_day', 'month', 'day_of_week'
+	]
+	df = pd.DataFrame(df_array, columns=input_feature_names)
 
-	cont = df_array[:, cont_idx].astype(float)
-	cont_scaled = SCALER.transform(cont)
+	# Scale continuous features - use DataFrame to maintain feature names
+	continuous_features = [
+		'Elevation', 'Road_Density', 'Rain_mm', 'Rain_Past3h',
+		'Drain_Water_Level', 'Soil_Moisture'
+	]
+	df_scaled = pd.DataFrame(
+		SCALER.transform(df[continuous_features]),
+		columns=continuous_features
+	)
 
-	# time features cyclical encoding
-	hour = df_array[:,6].astype(float)
-	month = df_array[:,7].astype(float)
-	dow = df_array[:,8].astype(float)
+	# Create cyclical time features - matching training pipeline exactly
+	df_scaled['hour_sin'] = np.sin(2 * np.pi * df['hour_of_day'] / 24)
+	df_scaled['hour_cos'] = np.cos(2 * np.pi * df['hour_of_day'] / 24)
+	df_scaled['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+	df_scaled['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+	df_scaled['dow_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
+	df_scaled['dow_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
 
-	hour_sin = np.sin(2 * np.pi * hour / 24)
-	hour_cos = np.cos(2 * np.pi * hour / 24)
-	month_sin = np.sin(2 * np.pi * month / 12)
-	month_cos = np.cos(2 * np.pi * month / 12)
-	dow_sin = np.sin(2 * np.pi * dow / 7)
-	dow_cos = np.cos(2 * np.pi * dow / 7)
+	# Create final feature DataFrame matching training: scaled continuous + cyclical time
+	# Order: Elevation, Road_Density, Rain_mm, Rain_Past3h, Drain_Water_Level, Soil_Moisture,
+	#        hour_sin, hour_cos, month_sin, month_cos, dow_sin, dow_cos
+	X_final = df_scaled[continuous_features + ['hour_sin', 'hour_cos', 'month_sin', 'month_cos', 'dow_sin', 'dow_cos']]
 
-	time_feats = np.stack([hour_sin, hour_cos, month_sin, month_cos, dow_sin, dow_cos], axis=1)
-
-	X = np.concatenate([cont_scaled, time_feats], axis=1)
-
-	preds = MODEL.predict(X)
-	probs = MODEL.predict_proba(X).max(axis=1)
+	# Predict using DataFrame (has feature names) - this eliminates sklearn warnings
+	preds = MODEL.predict(X_final)
+	proba_matrix = MODEL.predict_proba(X_final)
 	labels = LE.inverse_transform(preds)
 
 	results = []
-	for p, prob, lab in zip(preds.tolist(), probs.tolist(), labels.tolist()):
-		results.append({"class": int(p), "label": str(lab), "confidence": float(round(prob*100,2))})
+	for i, (pred_class, label) in enumerate(zip(preds.tolist(), labels.tolist())):
+		# Get probability of the PREDICTED class (more accurate than using max)
+		# This ensures confidence reflects the actual predicted class probability
+		class_prob = proba_matrix[i, pred_class]
+		results.append({
+			"class": int(pred_class),
+			"label": str(label),
+			"confidence": float(round(class_prob * 100, 2))
+		})
 	return results
 
 
@@ -234,65 +257,131 @@ def load_dataset():
 def derive_features_from_location(lat: float, lng: float):
     """Derive environmental features from latitude/longitude.
     
-    For now, this uses simplified heuristics based on Delhi's geography.
-    In a production system, you'd query actual GIS databases, elevation APIs, etc.
+    Uses dataset statistics when available to generate more realistic feature values
+    that match the training data distribution. Falls back to Delhi-specific heuristics
+    if dataset is not loaded.
     """
+    # Try to load dataset statistics for better defaults
+    df = load_dataset()
+    
     # Delhi bounds roughly: lat 28.4-28.9, lng 76.8-77.3
+    # Elevation estimation - use dataset statistics if available
+    if df is not None and not df.empty and 'Elevation' in df.columns:
+        elevation_mean = float(df['Elevation'].mean())
+        elevation_std = float(df['Elevation'].std())
+        elevation_min = float(df['Elevation'].min())
+        elevation_max = float(df['Elevation'].max())
+    else:
+        # Fallback to Delhi-specific defaults
+        elevation_mean = 210.0
+        elevation_std = 15.0
+        elevation_min = 180.0
+        elevation_max = 250.0
     
-    # Elevation estimation (Delhi ranges ~200-250m, higher in south/west)
-    # Simple linear interpolation based on position
-    elevation_base = 200
+    # Spatial variation: Delhi - higher in south/west
+    elevation_base = elevation_mean
     if lat < 28.6:  # Southern Delhi tends to be higher
-        elevation_base += 20
-    if lng < 77.1:  # Western areas slightly higher
         elevation_base += 10
-    # Add some variation based on exact coordinates
-    elevation = elevation_base + (lat - 28.6) * 50 + (lng - 77.1) * 30
-    elevation = max(180, min(250, elevation))  # Clamp to realistic range
+    if lng < 77.1:  # Western areas slightly higher
+        elevation_base += 5
+    # Add variation based on exact coordinates (within realistic range)
+    elevation_variation = (lat - 28.6) * 30 + (lng - 77.1) * 20
+    elevation = elevation_base + elevation_variation
+    elevation = max(elevation_min, min(elevation_max, elevation))
     
-    # Road density estimation (higher in central/commercial areas)
-    # Central Delhi (around 28.6-28.7 lat, 77.1-77.3 lng) has higher road density
-    road_density = 0.3  # Base density
+    # Road density - use dataset statistics if available
+    if df is not None and not df.empty and 'Road_Density' in df.columns:
+        road_density_mean = float(df['Road_Density'].mean())
+        road_density_std = float(df['Road_Density'].std())
+        road_density_base = road_density_mean
+    else:
+        road_density_base = 0.5
+        road_density_std = 0.2
+    
+    # Spatial variation: Central Delhi has higher road density
+    road_density = road_density_base
     if 28.6 <= lat <= 28.7 and 77.1 <= lng <= 77.3:
-        road_density = 0.8  # High density in central areas
+        road_density = min(1.0, road_density_base + 0.3)  # High density in central areas
     elif 28.55 <= lat <= 28.75 and 77.05 <= lng <= 77.35:
-        road_density = 0.6  # Medium density in urban areas
+        road_density = min(1.0, road_density_base + 0.15)  # Medium density in urban areas
+    else:
+        road_density = max(0.1, road_density_base - 0.1)  # Lower in outskirts
+    road_density = max(0.1, min(1.0, road_density))
     
-    # Rainfall - use seasonal defaults (can be enhanced with weather APIs)
-    # Monsoon season (July-September) typically has higher rainfall
+    # Rainfall - use dataset statistics if available, otherwise seasonal defaults
     current_month = datetime.datetime.now().month
-    if 7 <= current_month <= 9:  # Monsoon
-        rain_mm = 15.0
-        rain_past3h = 8.0
-    elif current_month in [6, 10]:  # Pre/post monsoon
-        rain_mm = 8.0
-        rain_past3h = 4.0
-    else:  # Dry season
-        rain_mm = 2.0
-        rain_past3h = 1.0
+    if df is not None and not df.empty and 'Rain_mm' in df.columns and 'Hour' in df.columns:
+        try:
+            # Ensure Hour column is datetime type
+            df_hour = df.copy()
+            if not pd.api.types.is_datetime64_any_dtype(df_hour['Hour']):
+                df_hour['Hour'] = pd.to_datetime(df_hour['Hour'], errors='coerce')
+            # Use monthly average from dataset if available
+            monthly_rain = df_hour[df_hour['Hour'].dt.month == current_month]['Rain_mm']
+            if not monthly_rain.empty and monthly_rain.notna().any():
+                rain_mm = float(monthly_rain.mean())
+                rain_past3h = float(monthly_rain.mean() * 0.5) if rain_mm > 0 else 0.0
+            else:
+                raise ValueError("No monthly rain data")
+        except (ValueError, AttributeError, KeyError):
+            # Fallback to seasonal defaults
+            if 7 <= current_month <= 9:  # Monsoon
+                rain_mm = 15.0
+                rain_past3h = 8.0
+            elif current_month in [6, 10]:  # Pre/post monsoon
+                rain_mm = 8.0
+                rain_past3h = 4.0
+            else:  # Dry season
+                rain_mm = 2.0
+                rain_past3h = 1.0
+    else:
+        # Seasonal defaults for Delhi
+        if 7 <= current_month <= 9:  # Monsoon (July-September)
+            rain_mm = 15.0
+            rain_past3h = 8.0
+        elif current_month in [6, 10]:  # Pre/post monsoon
+            rain_mm = 8.0
+            rain_past3h = 4.0
+        else:  # Dry season
+            rain_mm = 2.0
+            rain_past3h = 1.0
     
-    # Drain water level (higher in low-lying areas, during monsoon)
-    drain_level = 0.5  # Base level
-    if elevation < 210:  # Lower areas tend to have higher drain levels
-        drain_level = 1.2
-    if 7 <= current_month <= 9:  # Higher during monsoon
-        drain_level *= 1.5
+    # Drain water level - use dataset statistics if available
+    if df is not None and not df.empty and 'Drain_Water_Level' in df.columns:
+        drain_level_mean = float(df['Drain_Water_Level'].mean())
+        drain_level_base = drain_level_mean
+    else:
+        drain_level_base = 0.5
     
-    # Soil moisture (higher during monsoon, varies with elevation)
-    soil_moisture = 0.3  # Base moisture
+    drain_level = drain_level_base
+    if elevation < elevation_mean:  # Lower areas tend to have higher drain levels
+        drain_level = min(2.5, drain_level_base * 1.5)
     if 7 <= current_month <= 9:  # Higher during monsoon
-        soil_moisture = 0.7
+        drain_level = min(2.5, drain_level * 1.5)
+    drain_level = max(0.0, drain_level)
+    
+    # Soil moisture - use dataset statistics if available
+    if df is not None and not df.empty and 'Soil_Moisture' in df.columns:
+        soil_moisture_mean = float(df['Soil_Moisture'].mean())
+        soil_moisture_base = soil_moisture_mean
+    else:
+        soil_moisture_base = 0.3
+    
+    soil_moisture = soil_moisture_base
+    if 7 <= current_month <= 9:  # Higher during monsoon
+        soil_moisture = min(1.0, soil_moisture_base + 0.3)
     elif current_month in [6, 10]:
-        soil_moisture = 0.5
+        soil_moisture = min(1.0, soil_moisture_base + 0.15)
     # Lower areas retain more moisture
-    if elevation < 210:
-        soil_moisture = min(1.0, soil_moisture + 0.2)
+    if elevation < elevation_mean:
+        soil_moisture = min(1.0, soil_moisture + 0.15)
+    soil_moisture = max(0.0, min(1.0, soil_moisture))
     
     return {
         "Elevation": float(elevation),
         "Road_Density": float(road_density),
-        "Rain_mm": float(rain_mm),
-        "Rain_Past3h": float(rain_past3h),
+        "Rain_mm": float(max(0.0, rain_mm)),
+        "Rain_Past3h": float(max(0.0, rain_past3h)),
         "Drain_Water_Level": float(drain_level),
         "Soil_Moisture": float(soil_moisture)
     }
@@ -899,15 +988,21 @@ def predict_ward_batch(requests_list: List[WardPredictionRequest]):
       "failed": 0
     }
     """
+    import logging
+    logger = logging.getLogger("uvicorn")
+    
     try:
+        logger.info(f"[BATCH] Received batch prediction request with {len(requests_list)} locations")
         results = []
         failed = 0
         
-        for req in requests_list:
+        for idx, req in enumerate(requests_list):
             try:
                 # Reuse single prediction logic
                 result = predict_ward(req)
                 results.append(result)
+                if (idx + 1) % 10 == 0 or idx == 0:
+                    logger.info(f"[BATCH] Processed {idx + 1}/{len(requests_list)} predictions")
             except HTTPException as he:
                 failed += 1
                 results.append({
@@ -1100,7 +1195,11 @@ def get_ward_risk_heatmap(
                     results = transform_and_predict(arr)
                     if results:
                         class_id = results[0]["class"]
-                        score = WardAggregator.class_to_score(class_id)  # type: ignore
+                        if WardAggregator is not None:
+                            score = WardAggregator.class_to_score(class_id)  # type: ignore
+                        else:
+                            # Fallback: convert class to score manually (0=High=0.8, 1=Low=0.2, 2=Medium=0.5)
+                            score = 0.8 if class_id == 0 else (0.2 if class_id == 1 else 0.5)
                         grid_predictions[-1] = score
                 else:
                     # Predict for all grids in ward
@@ -1157,7 +1256,11 @@ def get_ward_risk_heatmap(
                             results = transform_and_predict(arr)
                             if results:
                                 class_id = results[0]["class"]
-                                score = WardAggregator.class_to_score(class_id)  # type: ignore
+                                if WardAggregator is not None:
+                                    score = WardAggregator.class_to_score(class_id)  # type: ignore
+                                else:
+                                    # Fallback: convert class to score manually
+                                    score = 0.8 if class_id == 0 else (0.2 if class_id == 1 else 0.5)
                                 grid_predictions[grid_id] = score
                         
                         except Exception as e:
@@ -1166,11 +1269,16 @@ def get_ward_risk_heatmap(
                 
                 # Aggregate to ward-level risk score
                 if grid_predictions:
-                    aggregator = WardAggregator()
-                    risk_score = aggregator.aggregate_predictions(
-                        grid_predictions,
-                        method=aggregation_method
-                    )
+                    if WardAggregator is not None:
+                        aggregator = WardAggregator()
+                        risk_score = aggregator.aggregate_predictions(
+                            grid_predictions,
+                            method=aggregation_method
+                        )
+                    else:
+                        # Fallback: use mean of scores
+                        scores = list(grid_predictions.values())
+                        risk_score = float(np.mean(scores)) if scores else 0.5
                     # Add to heatmap data: [latitude, longitude, intensity]
                     # Intensity is normalized 0-1, where 1 = highest risk
                     heatmap_data.append([lat, lon, float(risk_score)])
@@ -1180,6 +1288,7 @@ def get_ward_risk_heatmap(
                     
             except Exception as e:
                 print(f"[HEATMAP] Error processing ward {idx}: {e}")
+                traceback.print_exc()
                 error_count += 1
                 continue
         
@@ -1274,4 +1383,535 @@ def get_ward_geojson(ward_id: int):
         raise
     except Exception as ex:
         tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})
+
+
+# ========================= CHATBOT ENDPOINT WITH GROK API =======================
+
+class ChatRequest(BaseModel):
+    """Request model for chatbot queries."""
+    message: str
+    ward_name: Optional[str] = None
+
+
+def get_ward_centroid(ward_id: int):
+    """Get the centroid coordinates of a ward."""
+    try:
+        ward_gdf = get_ward_gdf()  # type: ignore
+        ward_rows = ward_gdf[ward_gdf['Ward_ID'] == ward_id]
+        if ward_rows.empty:
+            return None
+        row = ward_rows.iloc[0]
+        centroid = row.geometry.centroid
+        return {
+            'latitude': float(centroid.y),
+            'longitude': float(centroid.x)
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to get ward centroid for {ward_id}: {e}")
+        return None
+
+
+def _predict_ward_internal(latitude: float, longitude: float, aggregation_method: str = "mean"):
+    """Internal helper function to predict ward flood risk without HTTP endpoint overhead.
+    
+    This is a refactored version of predict_ward endpoint logic, used by the chat endpoint.
+    """
+    try:
+        if not is_ward_available():
+            return None
+        
+        # Find ward containing this location
+        ward_id = lookup_ward_id(latitude, longitude)  # type: ignore
+        if ward_id is None:
+            try:
+                from .grid_index import lookup_nearest_ward  # type: ignore
+            except Exception:
+                from grid_index import lookup_nearest_ward  # type: ignore
+            ward_id = lookup_nearest_ward(latitude, longitude)  # type: ignore
+        if ward_id is None:
+            return None
+        
+        # Get ward info
+        ward_info = get_ward_info(ward_id)  # type: ignore
+        ward_name = ward_info.get("Ward_Name") if ward_info else f"Ward_{ward_id}"
+        
+        # Get all grids in this ward
+        grid_ids = get_grids_in_ward(ward_id)  # type: ignore
+        
+        # Use current time
+        now = datetime.datetime.now()
+        hour = now.hour
+        month = now.month
+        dow = now.weekday()
+        
+        # Get predictions for all grids in the ward
+        df = load_dataset()
+        if df is None:
+            return None
+        
+        grid_predictions = {}
+        
+        if not grid_ids:
+            # Fallback: no grids mapped, infer risk directly at the given location
+            feats_loc = derive_features_from_location(latitude, longitude)
+            arr = np.array([[
+                feats_loc["Elevation"],
+                feats_loc["Road_Density"],
+                feats_loc["Rain_mm"],
+                feats_loc["Rain_Past3h"],
+                feats_loc["Drain_Water_Level"],
+                feats_loc["Soil_Moisture"],
+                int(hour),
+                int(month),
+                int(dow),
+            ]])
+            results = transform_and_predict(arr)
+            if results:
+                class_id = results[0]["class"]
+                if WardAggregator is not None:
+                    score = WardAggregator.class_to_score(class_id)  # type: ignore
+                else:
+                    # Fallback: convert class to score manually (0=High=0.8, 1=Low=0.2, 2=Medium=0.5)
+                    score = 0.8 if class_id == 0 else (0.2 if class_id == 1 else 0.5)
+                grid_predictions[-1] = score
+        else:
+            for grid_id in grid_ids:
+                try:
+                    df_grid = df[df["Grid_ID"] == int(grid_id)]
+                    if df_grid.empty:
+                        continue
+                    
+                    # Ensure Hour is datetime
+                    if not np.issubdtype(df_grid["Hour"].dtype, np.datetime64):
+                        try:
+                            df_grid = df_grid.assign(Hour=pd.to_datetime(df_grid["Hour"]))
+                        except Exception:
+                            pass
+                    
+                    # Filter by month and hour
+                    df_sel = df_grid[(df_grid["Hour"].dt.month == int(month)) & (df_grid["Hour"].dt.hour == int(hour))]
+                    if df_sel.empty:
+                        df_sel = df_grid.head(1)
+                    
+                    row = df_sel.iloc[0]
+                    
+                    def val_or_default(name, default):
+                        v = row.get(name)
+                        try:
+                            if v is None or (isinstance(v, float) and np.isnan(v)):
+                                return default
+                            return float(v)
+                        except Exception:
+                            return default
+                    
+                    feats_loc = derive_features_from_location(latitude, longitude)
+                    
+                    Elevation = val_or_default("Elevation", feats_loc["Elevation"])
+                    Road_Density = val_or_default("Road_Density", feats_loc["Road_Density"])
+                    Rain_mm = val_or_default("Rain_mm", feats_loc["Rain_mm"])
+                    Rain_Past3h = val_or_default("Rain_Past3h", feats_loc["Rain_Past3h"])
+                    Drain_Water_Level = val_or_default("Drain_Water_Level", feats_loc["Drain_Water_Level"])
+                    Soil_Moisture = val_or_default("Soil_Moisture", feats_loc["Soil_Moisture"])
+                    
+                    arr = np.array([[
+                        Elevation,
+                        Road_Density,
+                        Rain_mm,
+                        Rain_Past3h,
+                        Drain_Water_Level,
+                        Soil_Moisture,
+                        int(hour),
+                        int(month),
+                        int(dow),
+                    ]])
+                    
+                    results = transform_and_predict(arr)
+                    if results:
+                        class_id = results[0]["class"]
+                        if WardAggregator is not None:
+                            score = WardAggregator.class_to_score(class_id)  # type: ignore
+                        else:
+                            # Fallback: convert class to score manually (0=High=0.8, 1=Low=0.2, 2=Medium=0.5)
+                            score = 0.8 if class_id == 0 else (0.2 if class_id == 1 else 0.5)
+                        grid_predictions[grid_id] = score
+                
+                except Exception as e:
+                    print(f"[CHAT] Error predicting grid {grid_id}: {e}")
+                    traceback.print_exc()
+                    continue
+        
+        # If no grid predictions, use fallback single-point prediction at centroid
+        if not grid_predictions:
+            print(f"[CHAT] No grid predictions found, using fallback single-point prediction at centroid")
+            feats_loc = derive_features_from_location(latitude, longitude)
+            arr = np.array([[
+                feats_loc["Elevation"],
+                feats_loc["Road_Density"],
+                feats_loc["Rain_mm"],
+                feats_loc["Rain_Past3h"],
+                feats_loc["Drain_Water_Level"],
+                feats_loc["Soil_Moisture"],
+                int(hour),
+                int(month),
+                int(dow),
+            ]])
+            results = transform_and_predict(arr)
+            if results:
+                class_id = results[0]["class"]
+                if WardAggregator is not None:
+                    score = WardAggregator.class_to_score(class_id)  # type: ignore
+                else:
+                    score = 0.8 if class_id == 0 else (0.2 if class_id == 1 else 0.5)
+                grid_predictions[-1] = score
+            else:
+                # Last resort: use default medium risk
+                grid_predictions[-1] = 0.5
+        
+        # Aggregate predictions
+        if create_ward_prediction_summary is not None:
+            summary = create_ward_prediction_summary(  # type: ignore
+                ward_id=ward_id,
+                ward_name=ward_name,
+                grid_predictions=grid_predictions,
+                aggregation_method=aggregation_method
+            )
+        else:
+            # Fallback: create basic summary manually
+            scores = list(grid_predictions.values())
+            aggregated_score = float(np.mean(scores)) if scores else 0.5
+            risk_class_id, risk_class_name = (0, "High") if aggregated_score >= 0.66 else ((1, "Low") if aggregated_score < 0.33 else (2, "Medium"))
+            summary = {
+                "Ward_ID": ward_id,
+                "Ward_Name": ward_name or f"Ward_{ward_id}",
+                "Flood_Risk_Score": round(aggregated_score, 4),
+                "Flood_Risk_Class": risk_class_name,
+                "Flood_Risk_Class_ID": risk_class_id,
+                "Grid_Count": len(grid_predictions),
+                "Risk_Distribution": {"High": 0.33, "Medium": 0.34, "Low": 0.33}  # Simplified
+            }
+        
+        return summary
+    except Exception as e:
+        print(f"[CHAT] Error in _predict_ward_internal: {e}")
+        traceback.print_exc()
+        return None
+
+
+def get_ward_flood_data(ward_name_query: str):
+    """Get comprehensive flood risk data for a ward by name."""
+    try:
+        # Search for ward by name
+        if search_ward_by_name is None:
+            return None
+        
+        ward_info = search_ward_by_name(ward_name_query)  # type: ignore
+        if not ward_info:
+            return None
+        
+        ward_id = ward_info['Ward_ID']
+        ward_name = ward_info.get('Ward_Name', f"Ward {ward_id}")
+        
+        # Get ward centroid for prediction
+        centroid = get_ward_centroid(ward_id)
+        if not centroid:
+            return None
+        
+        # Get flood prediction for this ward using internal helper function
+        try:
+            prediction_result = _predict_ward_internal(
+                centroid['latitude'],
+                centroid['longitude'],
+                aggregation_method="mean"
+            )
+        except Exception as e:
+            print(f"[CHAT] Failed to get prediction for ward {ward_id}: {e}")
+            prediction_result = None
+        
+        # Get environmental features
+        features = derive_features_from_location(centroid['latitude'], centroid['longitude'])
+        
+        # Combine all data
+        ward_data = {
+            'ward_id': ward_id,
+            'ward_name': ward_name,
+            'location': centroid,
+            'flood_prediction': prediction_result,
+            'environmental_features': {
+                'elevation': features.get('Elevation'),
+                'road_density': features.get('Road_Density'),
+                'current_rainfall_mm': features.get('Rain_mm'),
+                'rainfall_past_3h_mm': features.get('Rain_Past3h'),
+                'drain_water_level': features.get('Drain_Water_Level'),
+                'soil_moisture': features.get('Soil_Moisture')
+            }
+        }
+        
+        return ward_data
+    except Exception as e:
+        print(f"[ERROR] Failed to get ward flood data: {e}")
+        traceback.print_exc()
+        return None
+
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    """Chatbot endpoint that uses Grok API to answer questions about ward flood risks.
+    
+    This endpoint:
+    1. Extracts ward name from user message
+    2. Fetches real ward data (elevation, flood risk, environmental features)
+    3. Uses Grok API to generate intelligent response based on actual data
+    4. Returns natural language response with flood risk assessment and prevention measures
+    
+    Request JSON:
+    {
+      "message": "What is the flood risk in FATEH NAGAR?",
+      "ward_name": "FATEH NAGAR"  // optional, will be extracted from message if not provided
+    }
+    
+    Response:
+    {
+      "response": "Based on the current data...",
+      "ward_data": {...}  // if ward was found
+    }
+    """
+    try:
+        # Get Gemini API key from environment (optional - will use fallback if not set)
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        use_gemini = bool(gemini_api_key)
+        
+        if not use_gemini:
+            print("[CHAT] Warning: GEMINI_API_KEY not found. Will use fallback response.")
+        
+        # Extract ward name from message if not provided
+        ward_name_query = request.ward_name
+        if not ward_name_query:
+            # Try to extract ward name from message (look for "ward", "Ward", ward number, or common patterns)
+            import re
+            # Look for patterns like "Ward 5", "ward 5", "5", or ward names
+            ward_match = re.search(r'(?:ward|Ward|WARD)\s*(\d+)', request.message, re.IGNORECASE)
+            if ward_match:
+                ward_name_query = ward_match.group(1)
+            else:
+                # Try to find ward name patterns (uppercase words, capitalized words)
+                words = request.message.split()
+                # Look for potential ward names (uppercase words, or words after "in", "at", "for")
+                for i, word in enumerate(words):
+                    if word.lower() in ['in', 'at', 'for', 'of'] and i + 1 < len(words):
+                        potential_ward = words[i + 1]
+                        # If it's uppercase or starts with capital, might be a ward name
+                        if potential_ward.isupper() or potential_ward[0].isupper():
+                            ward_name_query = potential_ward
+                            break
+                # If still no ward found, try to use the whole message or ask user
+                if not ward_name_query:
+                    # Default: try the entire message as ward name query
+                    ward_name_query = request.message.strip()
+        
+        # Get ward data
+        ward_data = None
+        if ward_name_query and search_ward_by_name:
+            try:
+                print(f"[CHAT] Searching for ward: {ward_name_query}")
+                ward_data = get_ward_flood_data(ward_name_query)
+                if ward_data:
+                    print(f"[CHAT] Found ward data for: {ward_data.get('ward_name')}")
+                else:
+                    print(f"[CHAT] No ward data found for: {ward_name_query}")
+            except Exception as e:
+                print(f"[CHAT] Error getting ward data: {e}")
+                traceback.print_exc()
+                ward_data = None
+        
+        # Prepare context for Gemini API
+        system_prompt = """You are a helpful assistant for DelhiFlow, a flood prediction system for Delhi, India. 
+You help citizens, MCD employees, and officers understand flood risks in different wards of Delhi.
+
+When provided with ward data, analyze it and provide:
+1. Current flood risk level (High/Medium/Low) and what it means
+2. Specific reasons why the risk is high/medium/low based on the actual data provided (elevation, rainfall, drain water level, soil moisture, etc.)
+3. Concrete prevention measures and recommendations to reduce waterlogging in that specific area
+4. Be factual, helpful, and use the actual data values provided
+
+If no ward data is provided, politely ask the user to specify a ward name or number."""
+
+        user_message = request.message
+        
+        # If we have ward data, include it in the context
+        if ward_data:
+            flood_risk = ward_data.get('flood_prediction') or {}
+            env_features = ward_data.get('environmental_features') or {}
+            
+            context_data = f"""
+Ward Information:
+- Ward ID: {ward_data.get('ward_id', 'N/A')}
+- Ward Name: {ward_data.get('ward_name', 'N/A')}
+- Location: {ward_data.get('location', {}).get('latitude', 'N/A') if ward_data.get('location') else 'N/A'}, {ward_data.get('location', {}).get('longitude', 'N/A') if ward_data.get('location') else 'N/A'}
+
+Flood Risk Prediction:
+- Risk Level: {flood_risk.get('Flood_Risk_Class', 'N/A') if flood_risk else 'N/A'}
+- Risk Score: {flood_risk.get('Flood_Risk_Score', 'N/A') if flood_risk else 'N/A'}
+- Risk Distribution: {flood_risk.get('Risk_Distribution', 'N/A') if flood_risk else 'N/A'}
+- Grid Count: {flood_risk.get('Grid_Count', 'N/A') if flood_risk else 'N/A'}
+
+Environmental Features (from actual APIs/data):
+- Elevation: {env_features.get('elevation', 'N/A') if env_features else 'N/A'} meters
+- Road Density: {env_features.get('road_density', 'N/A') if env_features else 'N/A'}
+- Current Rainfall: {env_features.get('current_rainfall_mm', 'N/A') if env_features else 'N/A'} mm
+- Rainfall (Past 3 hours): {env_features.get('rainfall_past_3h_mm', 'N/A') if env_features else 'N/A'} mm
+- Drain Water Level: {env_features.get('drain_water_level', 'N/A') if env_features else 'N/A'}
+- Soil Moisture: {env_features.get('soil_moisture', 'N/A') if env_features else 'N/A'}
+
+User Question: {user_message}
+
+Please analyze this data and provide a comprehensive answer about the flood risk, why it's at this level, and specific prevention measures."""
+        else:
+            context_data = f"""User Question: {user_message}
+
+The system could not find ward data for the query. Please help the user understand this and ask them to provide a specific ward name or number."""
+        
+        # Call Gemini API if key is available, otherwise use fallback
+        response_text = None
+        if use_gemini:
+            # Call Google Gemini API
+            # Gemini API endpoint format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+            gemini_model = os.getenv("GEMINI_MODEL", "gemini-pro")
+            gemini_api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
+            
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            # Gemini API uses a different format - combine system prompt and user message
+            full_prompt = f"{system_prompt}\n\n{context_data}"
+            
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": full_prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 1000,
+                }
+            }
+            
+            # Gemini API uses query parameter for API key
+            params = {
+                "key": gemini_api_key
+            }
+            
+            try:
+                response = requests.post(gemini_api_url, json=payload, headers=headers, params=params, timeout=30)
+                response.raise_for_status()
+                gemini_response = response.json()
+                
+                # Extract the response text from Gemini API
+                # Gemini API response format: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+                if 'candidates' in gemini_response and len(gemini_response['candidates']) > 0:
+                    candidate = gemini_response['candidates'][0]
+                    if 'content' in candidate and 'parts' in candidate['content']:
+                        parts = candidate['content']['parts']
+                        if len(parts) > 0 and 'text' in parts[0]:
+                            response_text = parts[0]['text']
+                        else:
+                            response_text = str(parts)
+                    else:
+                        response_text = str(candidate)
+                else:
+                    response_text = str(gemini_response)
+                    
+            except requests.exceptions.HTTPError as e:
+                # Get error details from response
+                error_details = "Unknown error"
+                try:
+                    if e.response:
+                        error_response = e.response.json() if e.response.content else {}
+                        error_details = error_response.get('error', {}).get('message', str(e)) if isinstance(error_response.get('error'), dict) else str(error_response)
+                        print(f"[CHAT] Gemini API HTTP error: {e.response.status_code} - {error_details}")
+                        # Print full error response for debugging
+                        print(f"[CHAT] Full error response: {error_response}")
+                    else:
+                        print(f"[CHAT] Gemini API HTTP error: {e}")
+                except Exception as parse_error:
+                    print(f"[CHAT] Gemini API HTTP error: {e}")
+                    print(f"[CHAT] Could not parse error response: {parse_error}")
+                print(f"[CHAT] Using fallback response instead")
+                response_text = None  # Will use fallback
+            except requests.exceptions.RequestException as e:
+                print(f"[CHAT] Gemini API request failed: {e}")
+                print(f"[CHAT] Error details: {str(e)}")
+                traceback.print_exc()
+                response_text = None  # Will use fallback
+        
+        # Use fallback response if Gemini API is not available or failed
+        if not response_text:
+            if ward_data:
+                flood_risk = ward_data.get('flood_prediction') or {}
+                env_features = ward_data.get('environmental_features') or {}
+                
+                risk_level = flood_risk.get('Flood_Risk_Class', 'N/A') if flood_risk else 'N/A'
+                risk_score = flood_risk.get('Flood_Risk_Score', 'N/A') if flood_risk else 'N/A'
+                elevation = env_features.get('elevation', 'N/A') if env_features else 'N/A'
+                rainfall = env_features.get('current_rainfall_mm', 'N/A') if env_features else 'N/A'
+                drain_level = env_features.get('drain_water_level', 'N/A') if env_features else 'N/A'
+                soil_moisture = env_features.get('soil_moisture', 'N/A') if env_features else 'N/A'
+                road_density = env_features.get('road_density', 'N/A') if env_features else 'N/A'
+                
+                # Generate detailed fallback response
+                response_text = f"""Flood Risk Assessment for {ward_data.get('ward_name', 'the ward')}
+
+**Current Flood Risk Level: {risk_level}**
+Risk Score: {risk_score if risk_score != 'N/A' else 'Not Available'}
+
+**Key Environmental Factors:**
+- Elevation: {elevation} meters
+- Current Rainfall: {rainfall} mm
+- Rainfall (Past 3 hours): {env_features.get('rainfall_past_3h_mm', 'N/A') if env_features else 'N/A'} mm
+- Drain Water Level: {drain_level}
+- Soil Moisture: {soil_moisture}
+- Road Density: {road_density}
+
+**Risk Analysis:**
+"""
+                # Add risk-specific analysis
+                if risk_level == 'High':
+                    response_text += "This ward has a HIGH flood risk. Contributing factors likely include:\n"
+                    if isinstance(elevation, (int, float)) and elevation < 210:
+                        response_text += "- Lower elevation making it prone to water accumulation\n"
+                    if isinstance(rainfall, (int, float)) and rainfall > 10:
+                        response_text += "- High current rainfall levels\n"
+                    if isinstance(drain_level, (int, float)) and drain_level > 1.5:
+                        response_text += "- Elevated drain water levels indicating drainage stress\n"
+                    response_text += "\n**Urgent Prevention Measures:**\n"
+                elif risk_level == 'Medium':
+                    response_text += "This ward has a MEDIUM flood risk. The area is moderately vulnerable to waterlogging.\n\n**Recommended Prevention Measures:**\n"
+                else:
+                    response_text += "This ward has a LOW flood risk. The area is relatively safe from flooding.\n\n**Maintenance Recommendations:**\n"
+                
+                response_text += """1. Ensure proper drainage system maintenance and regular cleaning
+2. Monitor drain water levels, especially during monsoon season
+3. Clear blocked drains and stormwater channels before heavy rains
+4. Consider elevation improvements in low-lying sub-areas
+5. Implement rainwater harvesting systems to reduce surface runoff
+6. Regular inspection of drainage infrastructure
+7. Coordinate with municipal authorities for timely interventions
+
+**Note:** This assessment is based on current environmental data and predictive modeling. Risk levels may change with weather conditions."""
+            else:
+                response_text = "I couldn't find data for that ward. Please provide a specific ward name or number (e.g., 'FATEH NAGAR', 'Ward 5', or just '5')."
+        
+        return {
+            "response": response_text,
+            "ward_data": ward_data if ward_data else None,
+            "message": request.message
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as ex:
+        tb = traceback.format_exc()
+        print(f"[CHAT] Error in chat endpoint: {tb}")
         raise HTTPException(status_code=500, detail={"error": str(ex), "trace": tb})

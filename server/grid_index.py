@@ -154,23 +154,58 @@ def lookup_nearest_ward(latitude: float, longitude: float) -> Optional[int]:
     """Return the Ward_ID whose geometry is nearest to the point.
 
     This is used as a fallback when a point falls just outside polygons.
+    Uses projected CRS (UTM) for accurate distance calculations in Delhi region.
     """
+    try:
+        import geopandas as gpd  # type: ignore
+    except ImportError:
+        return None
+    
     gdf = get_ward_gdf()
     pt = geom.Point(float(longitude), float(latitude))
+    
     try:
+        # Try spatial index nearest first (fastest)
         nearest_idx = list(gdf.sindex.nearest(pt, num_results=1))
         if nearest_idx:
             row = gdf.iloc[nearest_idx[0]]
             return int(row["Ward_ID"])  # type: ignore
     except Exception:
-        # Fallback if spatial index nearest fails: use geometric distance
-        try:
-            distances = gdf.geometry.distance(pt)
-            min_idx = distances.idxmin()
-            row = gdf.loc[min_idx]
-            return int(row["Ward_ID"])  # type: ignore
-        except Exception:
-            return None
+        pass  # Fall through to distance-based method
+    
+    # Fallback: use accurate distance calculation with projected CRS
+    try:
+        # Convert to UTM Zone 43N (EPSG:32643) for Delhi - accurate for distance calculations
+        # This eliminates the geographic CRS warning and provides accurate distances
+        if gdf.crs is None or gdf.crs.to_epsg() != 32643:
+            # Convert to projected CRS if not already
+            gdf_projected = gdf.to_crs('EPSG:32643')
+        else:
+            gdf_projected = gdf
+        
+        # Create point GeoSeries and convert to same CRS
+        point_gdf = gpd.GeoDataFrame([1], geometry=[geom.Point(longitude, latitude)], crs='EPSG:4326')
+        point_projected = point_gdf.to_crs('EPSG:32643')
+        pt_projected = point_projected.geometry.iloc[0]
+        
+        # Calculate distances in projected CRS (accurate)
+        distances = gdf_projected.geometry.distance(pt_projected)
+        min_idx = distances.idxmin()
+        row = gdf.loc[min_idx]  # Use original GDF for Ward_ID access
+        return int(row["Ward_ID"])  # type: ignore
+    except Exception as e:
+        # Final fallback: use geographic distance (less accurate but functional)
+        # Suppress warning by catching it
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning, message='.*geographic CRS.*')
+            try:
+                distances = gdf.geometry.distance(pt)
+                min_idx = distances.idxmin()
+                row = gdf.loc[min_idx]
+                return int(row["Ward_ID"])  # type: ignore
+            except Exception:
+                return None
     return None
 
 
@@ -194,6 +229,9 @@ def lookup_ward_id(latitude: float, longitude: float) -> Optional[int]:
     return lookup_nearest_ward(latitude, longitude)
 
 
+# Track if we've already warned about missing grid file (to avoid log spam)
+_grid_file_warning_shown = False
+
 def get_grids_in_ward(ward_id: int) -> List[int]:
     """Return list of all Grid_IDs that intersect with a ward.
     
@@ -201,8 +239,18 @@ def get_grids_in_ward(ward_id: int) -> List[int]:
         ward_id: The Ward_ID to query
         
     Returns:
-        List of Grid_IDs in the ward, or empty list if ward not found
+        List of Grid_IDs in the ward, or empty list if ward not found or grid file missing.
+        Empty list is expected when grid_index.geojson is not provided - system uses fallback.
     """
+    global _grid_file_warning_shown
+    
+    # Check if grid index is available first (avoids repeated FileNotFoundError spam)
+    if not is_available():
+        if not _grid_file_warning_shown:
+            print("[INFO] Grid geometry file not found - using single-point prediction fallback (this is expected if grid_index.geojson is not provided)")
+            _grid_file_warning_shown = True
+        return []  # Graceful fallback - system will use single-point prediction at ward centroid
+    
     try:
         ward_gdf = get_ward_gdf()
         grid_gdf = get_grid_gdf()
@@ -218,8 +266,18 @@ def get_grids_in_ward(ward_id: int) -> List[int]:
         intersecting = grid_gdf[grid_gdf.geometry.intersects(ward_geom)]
         
         return intersecting['Grid_ID'].astype(int).tolist()
+    except (FileNotFoundError, RuntimeError) as e:
+        # Grid file missing or invalid - show warning once, then use fallback silently
+        if "not found" in str(e).lower() or "No grid geometry file" in str(e):
+            if not _grid_file_warning_shown:
+                print("[INFO] Grid geometry file not found - using single-point prediction fallback")
+                _grid_file_warning_shown = True
+            return []
+        # Re-raise if it's a different RuntimeError
+        raise
     except Exception as e:
-        print(f"[ERROR] Failed to get grids in ward {ward_id}: {e}")
+        # Only log unexpected errors (not missing file errors which are expected)
+        print(f"[WARNING] Unexpected error getting grids in ward {ward_id}: {e}")
         return []
 
 
@@ -348,4 +406,78 @@ def get_ward_info(ward_id: int) -> Optional[dict]:
         return info
     except Exception as e:
         print(f"[ERROR] Failed to get ward info for {ward_id}: {e}")
+        return None
+
+
+def search_ward_by_name(ward_name_query: str) -> Optional[dict]:
+    """Search for a ward by name (case-insensitive, partial match).
+    
+    Searches through all ward names in the GeoDataFrame and returns the first match.
+    Also tries to extract ward number from queries like "Ward 5" or "5".
+    
+    Args:
+        ward_name_query: The ward name or number to search for (e.g., "FATEH NAGAR", "Ward 5", "5")
+        
+    Returns:
+        Dict with Ward_ID, Ward_Name, and bounds if found, None otherwise
+    """
+    try:
+        ward_gdf = get_ward_gdf()
+        query_lower = ward_name_query.strip().lower()
+        
+        # First, try to extract ward number from query
+        import re
+        ward_num_match = re.search(r'\d+', query_lower)
+        if ward_num_match:
+            ward_num = int(ward_num_match.group())
+            # Check if there's a direct match by Ward_ID
+            ward_rows_by_id = ward_gdf[ward_gdf['Ward_ID'] == ward_num]
+            if not ward_rows_by_id.empty:
+                row = ward_rows_by_id.iloc[0]
+                geom = row.geometry
+                bounds = geom.bounds
+                ward_name = _extract_ward_name(row, ward_gdf) or f"Ward {ward_num}"
+                return {
+                    'Ward_ID': int(ward_num),
+                    'Ward_Name': ward_name,
+                    'bounds': {
+                        'min_lon': float(bounds[0]),
+                        'min_lat': float(bounds[1]),
+                        'max_lon': float(bounds[2]),
+                        'max_lat': float(bounds[3])
+                    }
+                }
+        
+        # Search by name - iterate through all wards
+        for idx, row in ward_gdf.iterrows():
+            # Extract ward name using the same function used in get_ward_info
+            ward_name = _extract_ward_name(row, ward_gdf)
+            if not ward_name:
+                continue
+            
+            ward_name_lower = ward_name.lower()
+            ward_id = int(row['Ward_ID'])
+            
+            # Check for exact match or contains match
+            if (query_lower == ward_name_lower or 
+                query_lower in ward_name_lower or 
+                ward_name_lower in query_lower or
+                f"ward {ward_id}" == query_lower or
+                str(ward_id) == query_lower):
+                geom = row.geometry
+                bounds = geom.bounds
+                return {
+                    'Ward_ID': ward_id,
+                    'Ward_Name': ward_name,
+                    'bounds': {
+                        'min_lon': float(bounds[0]),
+                        'min_lat': float(bounds[1]),
+                        'max_lon': float(bounds[2]),
+                        'max_lat': float(bounds[3])
+                    }
+                }
+        
+        return None
+    except Exception as e:
+        print(f"[ERROR] Failed to search ward by name '{ward_name_query}': {e}")
         return None
