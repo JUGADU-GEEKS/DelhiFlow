@@ -9,11 +9,13 @@ import HeatmapView from './components/HeatmapView';
 import KnowYourWard from './components/KnowYourWard';
 import SafeRoute from './components/Route';
 import Chatbot from './components/Chatbot';
+import Navbar from './components/Navbar';
 
 function App() {
   return (
     <Router>
         <div className="app">
+          <Navbar />
           <Routes>
             <Route path="/" element={<Landing/>}/>
             <Route path="/predict" element={<Predict/>}/>

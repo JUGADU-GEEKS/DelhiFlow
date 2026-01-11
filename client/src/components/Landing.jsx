@@ -1,9 +1,7 @@
 import React from 'react';
 import Squares from './Squares';
-import Dock from './Dock';
 import ShinyText from './ShinyText';
 import ChromaGrid from './ChromaGrid';
-import { VscHome, VscArchive, VscAccount, VscGithubInverted } from 'react-icons/vsc';
 import kunalImage from '../../public/kunal.jpg';
 import sangyaImage from '../../public/sangya.jpg';
 import dhruvImage from '../../public/dhruv.jpg';
@@ -25,13 +23,6 @@ function Landing() {
       });
     }
   };
-
-  const dockItems = [
-    { icon: <VscHome size={24} />, label: 'Home', onClick: () => window.scrollTo({ top: 0, behavior: 'smooth' }) },
-    { icon: <VscArchive size={24} />, label: 'About', onClick: () => scrollToSection('about-section') },
-    { icon: <VscAccount size={24} />, label: 'Team', onClick: () => scrollToSection('team-section') },
-    { icon: <VscGithubInverted size={24} />, label: 'GitHub', onClick: () => window.open('https://github.com/JUGADU-GEEKS/DelhiFlow', '_blank') },
-  ];
 
   const teamMembers = [
     {
@@ -91,17 +82,6 @@ function Landing() {
           direction='diagonal'
           borderColor='#9a69b5'
           hoverFillColor='#222222'
-        />
-      </div>
-
-      {/* Dock Navigation */}
-      <div className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4">
-        <Dock 
-          items={dockItems}
-          panelHeight={68}
-          baseItemSize={50}
-          magnification={70}
-          className="bg-purple-900/20 backdrop-blur-xl"
         />
       </div>
 

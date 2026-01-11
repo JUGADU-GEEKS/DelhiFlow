@@ -23,6 +23,7 @@ const FloatingElement = ({ children, delay = 0, duration = 3 }) => (
 
 function PotholesIssue() {
   const navigate = useNavigate();
+  const API_BASE = import.meta.env.VITE_API_BASE || window.__API_BASE__ || 'http://127.0.0.1:8000';
   const [uploadedFile, setUploadedFile] = useState(null);
   const [filePreview, setFilePreview] = useState(null);
   const [showCamera, setShowCamera] = useState(false);
@@ -134,7 +135,7 @@ function PotholesIssue() {
       if (coords.lon != null) form.append('lon', String(coords.lon));
 
       // Change host/port if your backend runs elsewhere
-        const res = await fetch(`${import.meta.env.VITE_API_URL}/analyze_issue`, {
+        const res = await fetch(`${API_BASE}/analyze_issue`, {
         method: 'POST',
         body: form,
       });
@@ -156,7 +157,7 @@ function PotholesIssue() {
           if (coords.lat != null) reportForm.append('lat', String(coords.lat));
           if (coords.lon != null) reportForm.append('lon', String(coords.lon));
 
-          const reportRes = await fetch(`${import.meta.env.VITE_API_URL}/potholes/report`, {
+          const reportRes = await fetch(`${API_BASE}/potholes/report`, {
             method: 'POST',
             body: reportForm,
           });

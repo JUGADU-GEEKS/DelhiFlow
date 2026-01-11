@@ -32,6 +32,7 @@ const createMarkerIcon = (count) => {
 };
 
 const PotholesMap = () => {
+  const API_BASE = import.meta.env.VITE_API_BASE || window.__API_BASE__ || 'http://127.0.0.1:8000';
   const [potholes, setPotholes] = useState([]);
   const [isListExpanded, setIsListExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -40,7 +41,7 @@ const PotholesMap = () => {
   const fetchPotholes = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL}/potholes/map`);
+      const res = await fetch(`${API_BASE}/potholes/map`);
       if (!res.ok) throw new Error('Failed to fetch potholes');
       const data = await res.json();
       console.log('Potholes fetched:', data);

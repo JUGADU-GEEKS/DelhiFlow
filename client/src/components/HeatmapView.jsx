@@ -1,12 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Squares from './Squares';
-import Dock from './Dock';
 import ShinyText from './ShinyText';
-import { VscHome, VscSearch, VscRefresh, VscGithubInverted } from 'react-icons/vsc';
-import { useNavigate } from 'react-router-dom';
 
 function HeatmapView() {
-  const navigate = useNavigate();
   const API_BASE = import.meta.env.VITE_API_BASE || window.__API_BASE__ || 'http://127.0.0.1:8000';
   
   const mapRef = useRef(null);
@@ -24,34 +20,64 @@ function HeatmapView() {
   const [processedCount, setProcessedCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
 
-  const dockItems = [
-    { icon: <VscHome size={24} />, label: 'Home', onClick: () => navigate('/') },
-    { icon: <VscRefresh size={24} />, label: 'Refresh', onClick: () => window.location.reload() },
-    { icon: <VscGithubInverted size={24} />, label: 'GitHub', onClick: () => window.open('https://github.com/JUGADU-GEEKS/DelhiFlow', '_blank') },
-  ];
-
-  /* ---------------- LOAD LEAFLET ---------------- */
+  /* ---------------- LOAD LEAFLET & HEAT PLUGIN ---------------- */
   useEffect(() => {
-    if (window.L) {
+    // Check if both Leaflet and heat plugin are already loaded
+    if (window.L && window.L.heatLayer) {
       setIsMapReady(true);
       return;
     }
 
-    const css = document.createElement('link');
-    css.rel = 'stylesheet';
-    css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-    document.head.appendChild(css);
+    let isComponentMounted = true;
 
-    const script = document.createElement('script');
-    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-    script.onload = () => {
-      const heat = document.createElement('script');
-      heat.src = 'https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js';
-      heat.onload = () => setIsMapReady(true);
-      document.body.appendChild(heat);
+    const loadScripts = async () => {
+      try {
+        // Load Leaflet CSS
+        const css = document.createElement('link');
+        css.rel = 'stylesheet';
+        css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(css);
+
+        // Load Leaflet JS
+        if (!window.L) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+            script.async = true;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        }
+
+        // Load Leaflet.heat plugin
+        if (!window.L.heatLayer) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js';
+            script.async = true;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        }
+
+        if (isComponentMounted) {
+          setIsMapReady(true);
+        }
+      } catch (error) {
+        console.error('Error loading Leaflet or heat plugin:', error);
+        if (isComponentMounted) {
+          setError(`Failed to load map libraries: ${error.message}`);
+        }
+      }
     };
-    script.onerror = () => setError('Leaflet failed to load');
-    document.body.appendChild(script);
+
+    loadScripts();
+
+    return () => {
+      isComponentMounted = false;
+    };
   }, []);
 
   /* ---------------- INIT MAP ---------------- */
@@ -607,19 +633,8 @@ function HeatmapView() {
         />
       </div>
 
-      {/* Dock Navigation */}
-      <div className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4">
-        <Dock 
-          items={dockItems}
-          panelHeight={68}
-          baseItemSize={50}
-          magnification={70}
-          className="bg-purple-900/20 backdrop-blur-xl"
-        />
-      </div>
-
       {/* Main Content */}
-      <div className="relative z-10 px-4 py-24 max-w-7xl mx-auto">
+      <div className="relative z-10 px-4 py-24 max-w-7xl mx-auto" style={{ paddingTop: '120px' }}>
         
         {/* Page Header */}
         <div className="text-center mb-12 mt-8">

@@ -1,13 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import Squares from './Squares';
-import Dock from './Dock';
 import ShinyText from './ShinyText';
 import WardMap from './WardMap';
-import { VscHome, VscLocation, VscRefresh, VscGithubInverted } from 'react-icons/vsc';
-import { useNavigate } from 'react-router-dom';
 
 function PredictTest() {
-  const navigate = useNavigate();
   const API_BASE = import.meta.env.VITE_API_BASE || window.__API_BASE__ || 'http://127.0.0.1:8000';
   
   const [location, setLocation] = useState(null);
@@ -20,13 +16,6 @@ function PredictTest() {
   const [activeTab, setActiveTab] = useState('location');
   const [wardSearchInput, setWardSearchInput] = useState('');
   const [wardSearchLoading, setWardSearchLoading] = useState(false);
-
-  const dockItems = [
-    { icon: <VscHome size={24} />, label: 'Home', onClick: () => navigate('/') },
-    { icon: <VscLocation size={24} />, label: 'Get Location', onClick: () => getCurrentLocation() },
-    { icon: <VscRefresh size={24} />, label: 'Refresh', onClick: () => handleRefresh() },
-    { icon: <VscGithubInverted size={24} />, label: 'GitHub', onClick: () => window.open('https://github.com/JUGADU-GEEKS/DelhiFlow', '_blank') },
-  ];
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -233,17 +222,7 @@ function PredictTest() {
         />
       </div>
 
-      <div className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4">
-        <Dock 
-          items={dockItems}
-          panelHeight={68}
-          baseItemSize={50}
-          magnification={70}
-          className="bg-purple-900/20 backdrop-blur-xl"
-        />
-      </div>
-
-      <div className="relative z-10 px-4 py-24 max-w-7xl mx-auto">
+      <div className="relative z-10 px-4 py-24 max-w-7xl mx-auto" style={{ paddingTop: '120px' }}>
         <div className="text-center mb-16 mt-8">
           <ShinyText
             text="Location-Based Predictor"

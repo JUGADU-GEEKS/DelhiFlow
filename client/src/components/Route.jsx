@@ -347,7 +347,7 @@ function Route() {
   };
 
   return (
-    <div className="route-container">
+    <div className="route-container" style={{ paddingTop: '100px' }}>
       <div className="route-sidebar">
         <div className="route-header">
           <h1>🚗 Safe Route Finder</h1>
