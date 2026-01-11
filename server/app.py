@@ -1923,16 +1923,69 @@ async def chat(request: ChatRequest):
                 ward_data = None
         
         # Prepare context for Gemini API
-        system_prompt = """You are a helpful assistant for DelhiFlow, a flood prediction system for Delhi, India. 
-You help citizens, MCD employees, and officers understand flood risks in different wards of Delhi.
+        system_prompt = """You are an expert waterlogging risk analyst for DelhiFlow, a comprehensive waterlogging prediction system for Delhi, India.
 
-When provided with ward data, analyze it and provide:
-1. Current flood risk level (High/Medium/Low) and what it means
-2. Specific reasons why the risk is high/medium/low based on the actual data provided (elevation, rainfall, drain water level, soil moisture, etc.)
-3. Concrete prevention measures and recommendations to reduce waterlogging in that specific area
-4. Be factual, helpful, and use the actual data values provided
+CRITICAL INSTRUCTIONS:
+1. This analysis is about WATERLOGGING ISSUES, not general flood risk
+2. Your response MUST be detailed and comprehensive
+3. Keep your response within 4000 tokens MAXIMUM - do not exceed this limit
+4. DO NOT use markdown formatting (no **, ##, ==, etc.) - keep it clean and professional
+5. Use clear section headers with dashes (---) only
+6. Provide one-liner statements followed by brief reasons
 
-If no ward data is provided, politely ask the user to specify a ward name or number."""
+For each ward analysis, provide ALL of the following sections:
+
+WATERLOGGING RISK LEVEL ASSESSMENT
+---
+State the risk level (High/Medium/Low) as a clear one-liner. Define what this means for waterlogging in the ward with brief context against other Delhi wards.
+
+WHY THIS WATERLOGGING RISK LEVEL - DETAILED CAUSAL ANALYSIS
+---
+Provide 4-5 paragraphs explaining root causes. Reference every data point with its implications. Focus on how factors combine to cause waterlogging (stagnation, surface accumulation, drainage failures). Use specific numbers from the data.
+
+KEY DRIVER VARIABLES FOR WATERLOGGING
+---
+List 5 most critical factors, each as a one-liner followed by brief reason:
+- Factor Name: One-liner statement. Reason: Why this matters for waterlogging.
+- Provide current value and critical threshold.
+
+WATERLOGGING VULNERABILITIES AND FACTOR INTERACTIONS
+---
+Explain how factors compound each other. Example: "Low elevation combined with poor drainage and high soil moisture creates persistent waterlogging because..."
+Identify most vulnerable areas within the ward.
+
+WATERLOGGING MITIGATION STRATEGY
+---
+Immediate Actions (0-3 months):
+List 4-6 specific measures. Each as one-liner with reason. Include estimated costs and timeline.
+
+Medium-Term Improvements (3-12 months):
+List 4-6 targeted drainage projects. Each as one-liner with reason and implementation timeline.
+
+RESPONSIBLE AUTHORITIES AND COORDINATION
+---
+List authorities with their specific roles:
+MCD Drainage Division - Role in stormwater management
+NDMC - If applicable to this ward
+PWD - Drainage infrastructure responsibility
+Local ward office - Implementation and monitoring
+Include contact points and accountability.
+
+FINAL SUMMARY FOR RESIDENTS
+---
+2-3 paragraphs in plain language about waterlogging risk. Practical steps residents can take. When to contact authorities. Emergency contacts.
+
+CRITICAL REQUIREMENTS:
+- Focus on WATERLOGGING, not flooding
+- Use ACTUAL data values provided - never make up numbers
+- Be specific and factual - no generic statements
+- Stay within 4000 tokens maximum
+- NO MARKDOWN SYMBOLS (**, ##, ==, etc.)
+- Use simple dashes (---) for section breaks only
+- Provide crisp one-liners followed by brief reasons
+- Make it professional and easy to read
+- Structure clearly and logically
+- Provide practical, actionable solutions"""
 
         user_message = request.message
         
@@ -1941,40 +1994,44 @@ If no ward data is provided, politely ask the user to specify a ward name or num
             flood_risk = ward_data.get('flood_prediction') or {}
             env_features = ward_data.get('environmental_features') or {}
             
-            context_data = f"""
-Ward Information:
-- Ward ID: {ward_data.get('ward_id', 'N/A')}
-- Ward Name: {ward_data.get('ward_name', 'N/A')}
-- Location: {ward_data.get('location', {}).get('latitude', 'N/A') if ward_data.get('location') else 'N/A'}, {ward_data.get('location', {}).get('longitude', 'N/A') if ward_data.get('location') else 'N/A'}
+            # Build detailed context with all available data
+            context_data = f"""WARD DATA FOR WATERLOGGING ANALYSIS:
 
-Flood Risk Prediction:
-- Risk Level: {flood_risk.get('Flood_Risk_Class', 'N/A') if flood_risk else 'N/A'}
-- Risk Score: {flood_risk.get('Flood_Risk_Score', 'N/A') if flood_risk else 'N/A'}
-- Risk Distribution: {flood_risk.get('Risk_Distribution', 'N/A') if flood_risk else 'N/A'}
-- Grid Count: {flood_risk.get('Grid_Count', 'N/A') if flood_risk else 'N/A'}
+WARD IDENTIFICATION:
+Ward Name: {ward_data.get('ward_name', 'N/A')}
+Ward ID: {ward_data.get('ward_id', 'N/A')}
+Location: Latitude {ward_data.get('location', {}).get('latitude', 'N/A')}, Longitude {ward_data.get('location', {}).get('longitude', 'N/A') if ward_data.get('location') else 'N/A'}
 
-Environmental Features (from actual APIs/data):
-- Elevation: {env_features.get('elevation', 'N/A') if env_features else 'N/A'} meters
-- Road Density: {env_features.get('road_density', 'N/A') if env_features else 'N/A'}
-- Current Rainfall: {env_features.get('current_rainfall_mm', 'N/A') if env_features else 'N/A'} mm
-- Rainfall (Past 3 hours): {env_features.get('rainfall_past_3h_mm', 'N/A') if env_features else 'N/A'} mm
-- Drain Water Level: {env_features.get('drain_water_level', 'N/A') if env_features else 'N/A'}
-- Soil Moisture: {env_features.get('soil_moisture', 'N/A') if env_features else 'N/A'}
+WATERLOGGING RISK PREDICTION (From AI Model):
+Predicted Waterlogging Risk Class: {flood_risk.get('Flood_Risk_Class', 'N/A')}
+Risk Score: {flood_risk.get('Flood_Risk_Score', 'N/A')} (out of 1.0, where 1.0 = highest waterlogging risk)
+Risk Distribution: {flood_risk.get('Risk_Distribution', 'N/A')}
+Number of Grids Analyzed: {flood_risk.get('Grid_Count', 'N/A')}
 
-User Question: {user_message}
+ENVIRONMENTAL AND PHYSICAL FEATURES (Indicators of Waterlogging Risk):
+Elevation: {env_features.get('elevation', 'N/A')} meters (lower elevation = more waterlogging prone)
+Road Density: {env_features.get('road_density', 'N/A')} (km/km² - affects drainage flow)
+Current Rainfall Intensity: {env_features.get('current_rainfall_mm', 'N/A')} mm/hour
+Rainfall (Last 3 hours): {env_features.get('rainfall_past_3h_mm', 'N/A')} mm (cumulative - drives stagnation)
+Drain Water Level: {env_features.get('drain_water_level', 'N/A')} (normalized 0-1, higher = drainage capacity exceeded)
+Soil Moisture: {env_features.get('soil_moisture', 'N/A')} (normalized 0-1, affects water retention)
 
-Please analyze this data and provide a comprehensive answer about the flood risk, why it's at this level, and specific prevention measures."""
+USER QUESTION: {user_message}
+
+Based on the above data, provide a comprehensive waterlogging risk analysis using the required format. Focus on WATERLOGGING (stagnation, surface water accumulation, poor drainage), not general flooding. Remember: NO MARKDOWN SYMBOLS, use only dashes for section breaks."""
         else:
-            context_data = f"""User Question: {user_message}
+            context_data = f"""USER QUESTION: {user_message}
 
-The system could not find ward data for the query. Please help the user understand this and ask them to provide a specific ward name or number."""
+NOTE: The system could not find ward data for this query. Please ask the user to provide a specific ward name or ward number in Delhi.
+Suggest examples like Ward 12, Sangam Park, Dilshad Garden, etc.
+Focus on waterlogging issues specific to that area."""
         
         # Call Gemini API if key is available, otherwise use fallback
         response_text = None
         if use_gemini:
             # Call Google Gemini API
             # Gemini API endpoint format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-            gemini_model = os.getenv("GEMINI_MODEL", "gemini-pro")
+            gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
             gemini_api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
             
             headers = {
@@ -1992,7 +2049,7 @@ The system could not find ward data for the query. Please help the user understa
                 }],
                 "generationConfig": {
                     "temperature": 0.7,
-                    "maxOutputTokens": 1000,
+                    "maxOutputTokens": 4000,
                 }
             }
             
@@ -2002,6 +2059,8 @@ The system could not find ward data for the query. Please help the user understa
             }
             
             try:
+                print(f"[CHAT] Calling Gemini API: {gemini_model}")
+                print(f"[CHAT] API Key length: {len(gemini_api_key) if gemini_api_key else 0}")
                 response = requests.post(gemini_api_url, json=payload, headers=headers, params=params, timeout=30)
                 response.raise_for_status()
                 gemini_response = response.json()
@@ -2028,9 +2087,21 @@ The system could not find ward data for the query. Please help the user understa
                     if e.response:
                         error_response = e.response.json() if e.response.content else {}
                         error_details = error_response.get('error', {}).get('message', str(e)) if isinstance(error_response.get('error'), dict) else str(error_response)
-                        print(f"[CHAT] Gemini API HTTP error: {e.response.status_code} - {error_details}")
+                        print(f"[CHAT] Gemini API HTTP {e.response.status_code} Error: {e.response.reason}")
+                        print(f"[CHAT] Error message: {error_details}")
                         # Print full error response for debugging
                         print(f"[CHAT] Full error response: {error_response}")
+                        
+                        # Provide specific guidance based on error code
+                        if e.response.status_code == 403:
+                            print(f"[CHAT] ⚠️ 403 Forbidden: API key lacks permissions. Check:")
+                            print(f"[CHAT]   1. Generative Language API is enabled in Google Cloud Console")
+                            print(f"[CHAT]   2. API key has no IP/app restrictions")
+                            print(f"[CHAT]   3. API key has access to generativelanguage.googleapis.com")
+                        elif e.response.status_code == 400:
+                            print(f"[CHAT] ⚠️ 400 Bad Request: Invalid request format or API key")
+                        elif e.response.status_code == 401:
+                            print(f"[CHAT] ⚠️ 401 Unauthorized: Invalid or expired API key")
                     else:
                         print(f"[CHAT] Gemini API HTTP error: {e}")
                 except Exception as parse_error:
